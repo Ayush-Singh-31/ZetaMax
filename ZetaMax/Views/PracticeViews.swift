@@ -1,0 +1,331 @@
+import SwiftUI
+
+struct PracticeSetupView: View {
+    @Bindable var engine: SessionEngine
+
+    var body: some View {
+        ZetaScreen(maxWidth: 960) {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("PERFORMANCE PRACTICE", systemImage: "bolt.fill")
+                        .font(.caption.weight(.bold))
+                        .tracking(0.8)
+                        .foregroundStyle(.blue)
+                    Text("Train arithmetic, deliberately.")
+                        .font(.largeTitle.bold())
+                    Text("Every completed question stays on this Mac and becomes useful timing feedback.")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+
+                Picker("Mode", selection: $engine.configuration.mode) {
+                    ForEach(PracticeMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: engine.configuration.mode) { _, mode in
+                    if mode == .benchmark {
+                        engine.applyBenchmark(BenchmarkProfile.builtIns.first { $0.durationSeconds == 120 }!)
+                    } else {
+                        engine.configuration.benchmarkID = nil
+                        engine.configuration.benchmarkVersion = nil
+                    }
+                }
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 18) {
+                        modeConfiguration
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                }
+                .groupBoxStyle(ZetaGroupBoxStyle())
+
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                storageLabel
+                Spacer()
+                startButton
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .top) { Divider() }
+        }
+        .navigationTitle("Practice")
+    }
+
+    private var storageLabel: some View {
+        Label("Stored only on this Mac", systemImage: "lock.fill")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+
+    private var startButton: some View {
+        Button("Start session") { engine.start() }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.return, modifiers: [])
+            .accessibilityIdentifier("startSessionButton")
+    }
+
+    @ViewBuilder
+    private var modeConfiguration: some View {
+        switch engine.configuration.mode {
+        case .classic, .adaptive:
+            operations
+            Divider()
+            rangeEditors
+            Divider()
+            durationEditor
+            if engine.configuration.mode == .adaptive {
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("Weakness focus")
+                        Spacer()
+                        Text(focusLabel).foregroundStyle(.secondary)
+                    }
+                    Slider(value: $engine.configuration.adaptiveFocus, in: 0...1)
+                    Text("Lower values preserve variety; higher values concentrate on slower and less accurate categories.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        case .targeted:
+            Picker("Target", selection: $engine.configuration.targetedPreset) {
+                ForEach(TargetedPreset.allCases) { preset in Text(preset.title).tag(preset) }
+            }
+            Text(engine.configuration.targetedPreset.detail)
+                .foregroundStyle(.secondary)
+            RangeEditor(title: "Practice range", range: $engine.configuration.targetedRange)
+            durationEditor
+        case .benchmark:
+            Picker("Profile", selection: benchmarkSelection) {
+                ForEach(BenchmarkProfile.builtIns) { profile in Text(profile.name).tag(profile.id) }
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), alignment: .leading)], alignment: .leading, spacing: 10) {
+                Label("All four operations", systemImage: "checkmark.seal.fill")
+                Label("Addition 2–100", systemImage: "plus")
+                Label("Multiplication 2–12 × 2–100", systemImage: "multiply")
+            }
+            .foregroundStyle(.secondary)
+            Text("Benchmark settings are locked and versioned, so scores remain comparable.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var operations: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Operations").font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), alignment: .leading)], alignment: .leading, spacing: 10) {
+                ForEach(ArithmeticOperation.allCases.filter { [.addition, .subtraction, .multiplication, .division].contains($0) }) { operation in
+                    Toggle(isOn: operationBinding(operation)) {
+                        Text("\(operation.symbol)  \(operation.title)")
+                    }
+                    .toggleStyle(.button)
+                }
+            }
+        }
+    }
+
+    private var rangeEditors: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Operand ranges").font(.headline)
+            RangeEditor(title: "Addition · left", range: $engine.configuration.additionLeft)
+            RangeEditor(title: "Addition · right", range: $engine.configuration.additionRight)
+            RangeEditor(title: "Multiplication · left", range: $engine.configuration.multiplicationLeft)
+            RangeEditor(title: "Multiplication · right", range: $engine.configuration.multiplicationRight)
+            Text("Subtraction reverses generated addition questions; division reverses multiplication for exact integer answers.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var durationEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Duration").font(.headline)
+                Spacer()
+                Text(DurationText.compact(engine.configuration.durationSeconds)).monospacedDigit()
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 68, maximum: 100))], alignment: .leading, spacing: 8) {
+                ForEach([30, 45, 60, 120, 300, 600], id: \.self) { seconds in
+                    Button(DurationText.compact(seconds)) { engine.configuration.durationSeconds = seconds }
+                        .buttonStyle(.bordered)
+                        .tint(engine.configuration.durationSeconds == seconds ? .accentColor : .secondary)
+                }
+            }
+            Stepper("Custom duration: \(engine.configuration.durationSeconds) seconds", value: $engine.configuration.durationSeconds, in: 15...3_600, step: 15)
+                .frame(maxWidth: 280, alignment: .leading)
+        }
+    }
+
+    private var focusLabel: String {
+        switch engine.configuration.adaptiveFocus {
+        case ..<0.34: "Varied"
+        case ..<0.67: "Balanced"
+        default: "Concentrated"
+        }
+    }
+
+    private func operationBinding(_ operation: ArithmeticOperation) -> Binding<Bool> {
+        Binding(
+            get: { engine.configuration.operations.contains(operation) },
+            set: { enabled in
+                if enabled {
+                    if !engine.configuration.operations.contains(operation) { engine.configuration.operations.append(operation) }
+                } else if engine.configuration.operations.count > 1 {
+                    engine.configuration.operations.removeAll { $0 == operation }
+                }
+            }
+        )
+    }
+
+    private var benchmarkSelection: Binding<String> {
+        Binding(
+            get: { engine.configuration.benchmarkID ?? "zetamac-standard-120" },
+            set: { id in
+                if let profile = BenchmarkProfile.builtIns.first(where: { $0.id == id }) { engine.applyBenchmark(profile) }
+            }
+        )
+    }
+}
+
+private struct RangeEditor: View {
+    let title: String
+    @Binding var range: OperandRange
+
+    var body: some View {
+        HStack {
+            Text(title).frame(minWidth: 130, idealWidth: 170, maxWidth: 190, alignment: .leading)
+            TextField("Minimum", value: $range.minimum, format: .number)
+                .frame(width: 90)
+                .multilineTextAlignment(.trailing)
+            Text("to").foregroundStyle(.secondary)
+            TextField("Maximum", value: $range.maximum, format: .number)
+                .frame(width: 90)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+struct ActivePracticeView: View {
+    @Bindable var engine: SessionEngine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                metric("Time", DurationText.clock(engine.remainingSeconds))
+                Spacer()
+                Button("End", role: .cancel) { engine.endEarly() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                Spacer()
+                metric("Score", String(engine.score))
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 18)
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .bottom) { Divider() }
+
+            Spacer()
+
+            VStack(spacing: 34) {
+                Text(engine.currentQuestion?.prompt ?? "")
+                    .font(.system(size: 58, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier("questionPrompt")
+                    .accessibilityLabel(engine.currentQuestion?.prompt ?? "Question")
+
+                FocusedAnswerField(
+                    text: $engine.answerText,
+                    onTextChange: engine.answerDidChange
+                )
+                .frame(width: 320, height: 58)
+                .accessibilityIdentifier("answerField")
+
+                Label("Correct answers submit automatically", systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: engine.currentQuestion?.prompt)
+
+            Spacer()
+            ZetaStatusChip(title: engine.configuration.mode.title, color: .blue)
+                .padding(22)
+        }
+        .background(
+            RadialGradient(colors: [Color.accentColor.opacity(0.08), .clear], center: .center, startRadius: 20, endRadius: 480)
+        )
+    }
+
+    private func metric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: label == "Time" ? .leading : .trailing, spacing: 3) {
+            Text(label.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(value)
+                .font(.title2.monospacedDigit().bold())
+                .foregroundStyle(label == "Time" && engine.remainingSeconds <= 10 ? Color.red : Color.primary)
+        }
+        .frame(width: 130, alignment: label == "Time" ? .leading : .trailing)
+    }
+}
+
+struct SessionResultsView: View {
+    @Bindable var engine: SessionEngine
+
+    var body: some View {
+        VStack(spacing: 28) {
+            Spacer()
+            Image(systemName: session?.status == .completed ? "checkmark.circle.fill" : "pause.circle.fill")
+                .font(.system(size: 54))
+                .foregroundStyle(session?.status == .completed ? Color.green : Color.orange)
+            VStack(spacing: 6) {
+                Text(session?.status == .completed ? "Session complete" : "Session interrupted")
+                    .font(.largeTitle.bold())
+                Text(session?.status == .completed ? "Your question-level data is ready to explore." : "The work was saved but excluded from benchmark trends.")
+                    .foregroundStyle(.secondary)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140, maximum: 190))], spacing: 12) {
+                ZetaMetricTile(title: "Completed", value: String(session?.correctCount ?? 0), tint: .blue)
+                ZetaMetricTile(title: "P90", value: milliseconds(p90), tint: .green)
+                ZetaMetricTile(title: "Median", value: milliseconds(median), tint: .orange)
+                ZetaMetricTile(title: "Questions/min", value: String(format: "%.1f", questionsPerMinute), tint: .purple)
+            }
+            .frame(maxWidth: 760)
+            HStack {
+                Button("Back to setup") { engine.dismissResults() }
+                Button("Practise again") {
+                    engine.dismissResults()
+                    engine.start()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [])
+            }
+            Spacer()
+        }
+        .padding(32)
+        .background(
+            LinearGradient(colors: [Color.accentColor.opacity(0.06), .clear], startPoint: .top, endPoint: .center)
+        )
+    }
+
+    private var session: PracticeSession? { engine.completedSession }
+    private var median: Double {
+        Statistics.median(session?.completedAttempts.compactMap(\.responseTimeMilliseconds).map(Double.init) ?? []) ?? 0
+    }
+    private var p90: Double {
+        Statistics.percentile(session?.completedAttempts.compactMap(\.responseTimeMilliseconds).map(Double.init) ?? [], 0.9) ?? 0
+    }
+    private var questionsPerMinute: Double {
+        guard let session else { return 0 }
+        let elapsed = Double(session.activeElapsedMilliseconds ?? 0) / 1_000
+        return elapsed > 0 ? Double(session.correctCount) / (elapsed / 60) : 0
+    }
+    private func milliseconds(_ value: Double) -> String { value > 0 ? String(format: "%.2fs", value / 1_000) : "—" }
+}

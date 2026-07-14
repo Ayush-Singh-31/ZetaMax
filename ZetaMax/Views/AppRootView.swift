@@ -60,7 +60,8 @@ struct AppRootView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 620)
-        .tint(.blue)
+        .tint(ZetaTheme.brand)
+        .preferredColorScheme(uiTestColorScheme)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: configureUITestWindowIfNeeded)
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
@@ -96,150 +97,28 @@ struct AppRootView: View {
         )
     }
 
+    private var uiTestColorScheme: ColorScheme? {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-ui-testing-light") { return .light }
+        if arguments.contains("-ui-testing-dark") { return .dark }
+        return nil
+    }
+
     private func configureUITestWindowIfNeeded() {
-        guard ProcessInfo.processInfo.arguments.contains("-ui-testing-compact") else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            NSApplication.shared.keyWindow?.setContentSize(NSSize(width: 860, height: 620))
-        }
-    }
-}
-
-enum ZetaVisuals {
-    static let cornerRadius: CGFloat = 16
-    static let screenWidth: CGFloat = 1_180
-    static let compactSpacing: CGFloat = 12
-}
-
-struct ZetaScreen<Content: View>: View {
-    let maxWidth: CGFloat
-    @ViewBuilder let content: Content
-
-    init(maxWidth: CGFloat = ZetaVisuals.screenWidth, @ViewBuilder content: () -> Content) {
-        self.maxWidth = maxWidth
-        self.content = content()
-    }
-
-    var body: some View {
-        ScrollView {
-            content
-                .padding(24)
-                .frame(maxWidth: maxWidth, alignment: .leading)
-                .frame(maxWidth: .infinity)
-        }
-        .background(
-            LinearGradient(
-                colors: [Color.accentColor.opacity(0.045), .clear],
-                startPoint: .topLeading,
-                endPoint: .center
-            )
-        )
-    }
-}
-
-struct ZetaCard<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: ZetaVisuals.cornerRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: ZetaVisuals.cornerRadius, style: .continuous)
-                    .strokeBorder(.primary.opacity(0.08))
+        let arguments = ProcessInfo.processInfo.arguments
+        let size: NSSize?
+        if arguments.contains("-ui-testing-compact") { size = NSSize(width: 860, height: 620) }
+        else if arguments.contains("-ui-testing-medium") { size = NSSize(width: 1_100, height: 760) }
+        else if arguments.contains("-ui-testing-wide") { size = NSSize(width: 1_500, height: 900) }
+        else { size = nil }
+        guard let size else { return }
+        for delay in [0.1, 0.35, 0.75] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                let window = NSApplication.shared.keyWindow
+                    ?? NSApplication.shared.windows.first(where: \.isVisible)
+                    ?? NSApplication.shared.windows.first
+                window?.setContentSize(size)
             }
-    }
-}
-
-struct ZetaMetricTile: View {
-    let title: String
-    let value: String
-    var detail: String? = nil
-    var tint: Color = .accentColor
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.semibold))
-                .tracking(0.5)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.title2.weight(.bold))
-                .monospacedDigit()
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            if let detail {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: detail == nil ? 78 : 96, alignment: .leading)
-        .background(tint.opacity(0.075), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(tint.opacity(0.13))
-        }
-    }
-}
-
-struct ZetaStatusChip: View {
-    let title: String
-    let color: Color
-
-    var body: some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(color.opacity(0.12), in: Capsule())
-    }
-}
-
-struct ZetaResponsivePair<First: View, Second: View>: View {
-    private let first: () -> First
-    private let second: () -> Second
-
-    init(@ViewBuilder first: @escaping () -> First, @ViewBuilder second: @escaping () -> Second) {
-        self.first = first
-        self.second = second
-    }
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
-                first().frame(maxWidth: .infinity)
-                second().frame(maxWidth: .infinity)
-            }
-            VStack(spacing: 16) {
-                first()
-                second()
-            }
-        }
-    }
-}
-
-struct ZetaGroupBoxStyle: GroupBoxStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            configuration.label
-                .font(.headline)
-            configuration.content
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: ZetaVisuals.cornerRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: ZetaVisuals.cornerRadius, style: .continuous)
-                .strokeBorder(.primary.opacity(0.08))
         }
     }
 }

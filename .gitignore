@@ -6,3 +6,4 @@ dist/
 xcuserdata/
 *.xccheckout
 *.xcscmblueprint
+Artifacts/

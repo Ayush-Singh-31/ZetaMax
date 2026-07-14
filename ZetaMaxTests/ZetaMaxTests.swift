@@ -327,6 +327,181 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertGreaterThan(weights[slow.categoryKey] ?? 0, weights[fast.categoryKey] ?? 0)
     }
 
+    func testHistoryLayoutPolicySwitchesWithoutAmbiguousBoundary() {
+        XCTAssertEqual(HistoryLayoutPolicy.mode(for: 480), .compact)
+        XCTAssertEqual(HistoryLayoutPolicy.mode(for: HistoryLayoutPolicy.wideThreshold - 0.5), .compact)
+        XCTAssertEqual(HistoryLayoutPolicy.mode(for: HistoryLayoutPolicy.wideThreshold), .wide)
+        XCTAssertEqual(HistoryLayoutPolicy.mode(for: 1_200), .wide)
+    }
+
+    func testDashboardUsesStableBaselinePriorPeriodAndHonestOperationRateLabel() throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let anchor = Date(timeIntervalSince1970: 100_000)
+        var current: [PracticeSession] = []
+        var previous: [PracticeSession] = []
+
+        for day in 0..<3 {
+            let old = try repository.createSession(configuration: .classicDefault, seed: UInt64(100 + day), startedAt: anchor.addingTimeInterval(Double(day - 10) * 86_400))
+            for position in 0..<10 {
+                try addTimedAttempt(repository: repository, session: old, categoryKey: "multiplication/core", categoryName: "Multiplication · core", prompt: "7 × 8", milliseconds: 2_000, position: position, presentedAt: old.startedAt.addingTimeInterval(Double(position) * 5))
+            }
+            try repository.finish(old, status: .completed, reason: .timerExpired, at: old.startedAt.addingTimeInterval(120), elapsedMilliseconds: 120_000)
+            previous.append(old)
+
+            let recent = try repository.createSession(configuration: .classicDefault, seed: UInt64(200 + day), startedAt: anchor.addingTimeInterval(Double(day) * 86_400))
+            for position in 0..<10 {
+                try addTimedAttempt(repository: repository, session: recent, categoryKey: "multiplication/core", categoryName: "Multiplication · core", prompt: "7 × 8", milliseconds: 1_000, position: position, presentedAt: recent.startedAt.addingTimeInterval(Double(position) * 5))
+            }
+            try repository.finish(recent, status: .completed, reason: .timerExpired, at: recent.startedAt.addingTimeInterval(120), elapsedMilliseconds: 120_000)
+            current.append(recent)
+        }
+
+        let snapshot = AnalyticsEngine.snapshot(
+            sessions: current,
+            baselineSessions: current + previous,
+            previousSessions: previous,
+            operation: .multiplication,
+            calendar: Calendar(identifier: .gregorian)
+        )
+        XCTAssertEqual(snapshot.throughputLabel, "Multiplication/min")
+        XCTAssertEqual(snapshot.questionsPerMinute, 5, accuracy: 0.001)
+        XCTAssertEqual(snapshot.trendResolution, .daily)
+        XCTAssertEqual(snapshot.trends.count, 3)
+        XCTAssertEqual(snapshot.priorPeriod[.medianTime]?.improvementPercent ?? 0, 100, accuracy: 0.001)
+        XCTAssertEqual(snapshot.speedIndex, 150, accuracy: 0.001, "Normalization must use all-time category baselines, not the filtered median")
+        XCTAssertEqual(snapshot.pace.sessions.count, 3)
+        XCTAssertFalse(snapshot.pace.representative.isEmpty)
+    }
+
+    func testEmptyAndOneSessionSnapshotsUseFallbacksAndProjectEveryBenchmarkDuration() throws {
+        let empty = AnalyticsEngine.snapshot(sessions: [])
+        XCTAssertEqual(empty.sessionCount, 0)
+        XCTAssertEqual(empty.completedCount, 0)
+        XCTAssertEqual(empty.distributionSummary, .empty)
+        XCTAssertTrue(empty.trends.isEmpty)
+        XCTAssertTrue(empty.pace.sessions.isEmpty)
+        XCTAssertEqual(empty.benchmarkProjections.map(\.durationSeconds), [30, 60, 120, 300, 600])
+        XCTAssertTrue(empty.benchmarkProjections.allSatisfy { $0.expected == nil })
+        XCTAssertTrue([empty.questionsPerMinute, empty.medianMilliseconds, empty.p90Milliseconds, empty.speedIndex, empty.consistency].allSatisfy(\.isFinite))
+
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let start = Date(timeIntervalSince1970: 150_000)
+        let completed = try repository.createSession(configuration: .classicDefault, seed: 301, startedAt: start)
+        for position in 0..<20 {
+            try addTimedAttempt(
+                repository: repository,
+                session: completed,
+                categoryKey: "multiplication/core",
+                categoryName: "Multiplication · core",
+                prompt: "7 × 8",
+                milliseconds: 500 + position * 100,
+                position: position,
+                presentedAt: start.addingTimeInterval(Double(position) * 5)
+            )
+        }
+        try repository.finish(completed, status: .completed, reason: .timerExpired, at: start.addingTimeInterval(120), elapsedMilliseconds: 120_000)
+
+        let interrupted = try repository.createSession(configuration: .classicDefault, seed: 302, startedAt: start.addingTimeInterval(86_400))
+        try addTimedAttempt(
+            repository: repository,
+            session: interrupted,
+            categoryKey: "multiplication/core",
+            categoryName: "Multiplication · core",
+            prompt: "7 × 8",
+            milliseconds: 60_000,
+            position: 0,
+            presentedAt: interrupted.startedAt
+        )
+        try repository.finish(interrupted, status: .interrupted, reason: .systemSleep, at: interrupted.startedAt.addingTimeInterval(60), elapsedMilliseconds: 60_000)
+
+        let snapshot = AnalyticsEngine.snapshot(sessions: [completed, interrupted], baselineSessions: [completed, interrupted])
+        XCTAssertEqual(snapshot.sessionCount, 1, "Interrupted sessions must stay out of comparable analytics")
+        XCTAssertEqual(snapshot.completedCount, 20)
+        XCTAssertEqual(snapshot.trendResolution, .session)
+        XCTAssertEqual(snapshot.trends.map(\.sessionID), [completed.id])
+        XCTAssertEqual(snapshot.distributionSummary.q1Milliseconds, 900)
+        XCTAssertEqual(snapshot.distributionSummary.medianMilliseconds, 1_450)
+        XCTAssertEqual(snapshot.distributionSummary.q3Milliseconds, 1_900)
+        XCTAssertEqual(snapshot.distributionSummary.p90Milliseconds, 2_200)
+        XCTAssertEqual(snapshot.pace.sessions.count, 1)
+        XCTAssertTrue(snapshot.pace.representative.isEmpty, "A representative pace needs at least three sessions")
+        XCTAssertEqual(snapshot.benchmarkProjections.map(\.durationSeconds), [30, 60, 120, 300, 600])
+        XCTAssertTrue(snapshot.benchmarkProjections.allSatisfy { $0.expected != nil })
+    }
+
+    func testOperationFilterAppliesToEveryAttemptDerivedDashboardValue() throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let start = Date(timeIntervalSince1970: 175_000)
+        let session = try repository.createSession(configuration: .classicDefault, seed: 303, startedAt: start)
+
+        for position in 0..<10 {
+            try addTimedAttempt(
+                repository: repository,
+                session: session,
+                categoryKey: "multiplication/core",
+                categoryName: "Multiplication · core",
+                prompt: "7 × 8",
+                milliseconds: 8_000,
+                position: position,
+                presentedAt: start.addingTimeInterval(Double(position) * 5)
+            )
+        }
+        for position in 10..<14 {
+            try addTimedAttempt(
+                repository: repository,
+                session: session,
+                categoryKey: "addition/core",
+                categoryName: "Addition · core",
+                prompt: "2 + 3",
+                milliseconds: 1_000,
+                position: position,
+                presentedAt: start.addingTimeInterval(Double(position) * 5),
+                operation: .addition
+            )
+        }
+        try repository.finish(session, status: .completed, reason: .timerExpired, at: start.addingTimeInterval(120), elapsedMilliseconds: 120_000)
+
+        let snapshot = AnalyticsEngine.snapshot(sessions: [session], baselineSessions: [session], operation: .addition)
+        XCTAssertEqual(snapshot.completedCount, 4)
+        XCTAssertEqual(snapshot.questionsPerMinute, 2, accuracy: 0.001)
+        XCTAssertEqual(snapshot.throughputLabel, "Addition/min")
+        XCTAssertEqual(snapshot.medianMilliseconds, 1_000)
+        XCTAssertEqual(snapshot.distributionSummary.count, 4)
+        XCTAssertEqual(snapshot.operations.map(\.operation), [.addition])
+        XCTAssertTrue(snapshot.categories.allSatisfy { $0.operation == .addition })
+        XCTAssertTrue(snapshot.slowestCompletions.allSatisfy { $0.categoryName == "Addition · core" })
+        XCTAssertTrue(snapshot.heatmap.isEmpty)
+        XCTAssertEqual(snapshot.trends.first?.sampleCount, 4)
+        XCTAssertEqual(snapshot.pace.sessions.first?.points.last?.completedCount, 4)
+        XCTAssertTrue(snapshot.benchmarkResults.isEmpty)
+    }
+
+    func testSparseHeatmapAndBenchmarkVersionsNeverImplyMissingData() throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let start = Date(timeIntervalSince1970: 200_000)
+
+        for version in [1, 2] {
+            var configuration = BenchmarkProfile.builtIns.first { $0.durationSeconds == 120 }!.configuration
+            configuration.benchmarkVersion = version
+            let session = try repository.createSession(configuration: configuration, seed: UInt64(version), startedAt: start.addingTimeInterval(Double(version) * 86_400))
+            for position in 0..<(version == 1 ? 8 : 11) {
+                try addTimedAttempt(repository: repository, session: session, categoryKey: "multiplication/core", categoryName: "Multiplication · core", prompt: "7 × 8", milliseconds: 1_000 + position * 10, position: position, presentedAt: session.startedAt.addingTimeInterval(Double(position) * 4))
+            }
+            try repository.finish(session, status: .completed, reason: .timerExpired, at: session.startedAt.addingTimeInterval(120), elapsedMilliseconds: 120_000)
+        }
+
+        let snapshot = AnalyticsEngine.snapshot(sessions: try repository.fetchSessions())
+        XCTAssertEqual(snapshot.heatmapPresentation, .rankedPairs)
+        XCTAssertEqual(snapshot.benchmarkProfiles.count, 2)
+        XCTAssertEqual(Set(snapshot.personalBests.keys).count, 2)
+        XCTAssertTrue(snapshot.benchmarkProfiles.contains { $0.version == 1 && $0.personalBest == 8 })
+        XCTAssertTrue(snapshot.benchmarkProfiles.contains { $0.version == 2 && $0.personalBest == 11 })
+    }
+
     private func addTimedAttempt(
         repository: SwiftDataRepository,
         session: PracticeSession,
@@ -336,16 +511,18 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         milliseconds: Int,
         position: Int,
         presentedAt: Date,
-        legacyWrongSubmission: Bool = false
+        legacyWrongSubmission: Bool = false,
+        operation: ArithmeticOperation = .multiplication
     ) throws {
+        let isRareMultiplication = operation == .multiplication && prompt == "12 × 99"
         let question = GeneratedQuestion(
-            operation: .multiplication,
+            operation: operation,
             kind: .standard,
-            category: QuestionCategory(key: categoryKey, displayName: categoryName, operation: .multiplication),
-            leftOperand: prompt == "12 × 99" ? 12 : 7,
-            rightOperand: prompt == "12 × 99" ? 99 : 8,
+            category: QuestionCategory(key: categoryKey, displayName: categoryName, operation: operation),
+            leftOperand: operation == .addition ? 2 : (isRareMultiplication ? 12 : 7),
+            rightOperand: operation == .addition ? 3 : (isRareMultiplication ? 99 : 8),
             prompt: prompt,
-            correctAnswer: prompt == "12 × 99" ? 1_188 : 56
+            correctAnswer: operation == .addition ? 5 : (isRareMultiplication ? 1_188 : 56)
         )
         let attempt = QuestionAttempt(question: question, position: position, presentedAt: presentedAt)
         try repository.addAttempt(attempt, to: session)

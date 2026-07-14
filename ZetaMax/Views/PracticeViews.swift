@@ -6,17 +6,12 @@ struct PracticeSetupView: View {
     var body: some View {
         ZetaScreen(maxWidth: 960) {
             VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("PERFORMANCE PRACTICE", systemImage: "bolt.fill")
-                        .font(.caption.weight(.bold))
-                        .tracking(0.8)
-                        .foregroundStyle(.blue)
-                    Text("Train arithmetic, deliberately.")
-                        .font(.largeTitle.bold())
-                    Text("Every completed question stays on this Mac and becomes useful timing feedback.")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
+                ZetaPageHeader(
+                    eyebrow: "Performance practice",
+                    title: "Train arithmetic, deliberately.",
+                    subtitle: "Every completed question stays on this Mac and becomes useful timing feedback.",
+                    systemImage: "bolt.fill"
+                )
 
                 Picker("Mode", selection: $engine.configuration.mode) {
                     ForEach(PracticeMode.allCases) { mode in
@@ -44,6 +39,7 @@ struct PracticeSetupView: View {
 
             }
         }
+        .accessibilityIdentifier("practiceScreen")
         .safeAreaInset(edge: .bottom) {
             HStack {
                 storageLabel
@@ -89,7 +85,7 @@ struct PracticeSetupView: View {
                         Text(focusLabel).foregroundStyle(.secondary)
                     }
                     Slider(value: $engine.configuration.adaptiveFocus, in: 0...1)
-                    Text("Lower values preserve variety; higher values concentrate on slower and less accurate categories.")
+                    Text("Lower values preserve variety; higher values concentrate on categories that take longer or have recently slowed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -200,14 +196,26 @@ private struct RangeEditor: View {
     @Binding var range: OperandRange
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack {
+                Text(title).frame(minWidth: 130, idealWidth: 170, maxWidth: 190, alignment: .leading)
+                fields
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                Text(title).font(.callout.weight(.medium))
+                fields
+            }
+        }
+    }
+
+    private var fields: some View {
         HStack {
-            Text(title).frame(minWidth: 130, idealWidth: 170, maxWidth: 190, alignment: .leading)
             TextField("Minimum", value: $range.minimum, format: .number)
-                .frame(width: 90)
+                .frame(minWidth: 68, idealWidth: 90, maxWidth: 100)
                 .multilineTextAlignment(.trailing)
             Text("to").foregroundStyle(.secondary)
             TextField("Maximum", value: $range.maximum, format: .number)
-                .frame(width: 90)
+                .frame(minWidth: 68, idealWidth: 90, maxWidth: 100)
                 .multilineTextAlignment(.trailing)
         }
     }
@@ -257,12 +265,20 @@ struct ActivePracticeView: View {
             .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: engine.currentQuestion?.prompt)
 
             Spacer()
-            ZetaStatusChip(title: engine.configuration.mode.title, color: .blue)
+            ZetaStatusChip(title: engine.configuration.mode.title, color: ZetaTheme.brand, systemImage: engine.configuration.mode.systemImage)
                 .padding(22)
         }
-        .background(
-            RadialGradient(colors: [Color.accentColor.opacity(0.08), .clear], center: .center, startRadius: 20, endRadius: 480)
-        )
+        .background {
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                RadialGradient(
+                    colors: [engine.remainingSeconds <= 10 ? ZetaTheme.caution.opacity(0.13) : ZetaTheme.brand.opacity(0.10), .clear],
+                    center: .center,
+                    startRadius: 20,
+                    endRadius: 500
+                )
+            }.ignoresSafeArea()
+        }
     }
 
     private func metric(_ label: String, _ value: String) -> some View {
@@ -270,7 +286,7 @@ struct ActivePracticeView: View {
             Text(label.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             Text(value)
                 .font(.title2.monospacedDigit().bold())
-                .foregroundStyle(label == "Time" && engine.remainingSeconds <= 10 ? Color.red : Color.primary)
+                .foregroundStyle(label == "Time" && engine.remainingSeconds <= 10 ? ZetaTheme.caution : Color.primary)
         }
         .frame(width: 130, alignment: label == "Time" ? .leading : .trailing)
     }
@@ -284,7 +300,7 @@ struct SessionResultsView: View {
             Spacer()
             Image(systemName: session?.status == .completed ? "checkmark.circle.fill" : "pause.circle.fill")
                 .font(.system(size: 54))
-                .foregroundStyle(session?.status == .completed ? Color.green : Color.orange)
+                .foregroundStyle(session?.status == .completed ? ZetaTheme.positive : ZetaTheme.caution)
             VStack(spacing: 6) {
                 Text(session?.status == .completed ? "Session complete" : "Session interrupted")
                     .font(.largeTitle.bold())
@@ -292,10 +308,10 @@ struct SessionResultsView: View {
                     .foregroundStyle(.secondary)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140, maximum: 190))], spacing: 12) {
-                ZetaMetricTile(title: "Completed", value: String(session?.correctCount ?? 0), tint: .blue)
-                ZetaMetricTile(title: "P90", value: milliseconds(p90), tint: .green)
-                ZetaMetricTile(title: "Median", value: milliseconds(median), tint: .orange)
-                ZetaMetricTile(title: "Questions/min", value: String(format: "%.1f", questionsPerMinute), tint: .purple)
+                ZetaMetricTile(title: "Completed", value: String(session?.correctCount ?? 0), tint: ZetaTheme.brand)
+                ZetaMetricTile(title: "Questions/min", value: String(format: "%.1f", questionsPerMinute), tint: ZetaTheme.cyan)
+                ZetaMetricTile(title: "Median", value: milliseconds(median), tint: ZetaTheme.caution)
+                ZetaMetricTile(title: "P90", value: milliseconds(p90), tint: Color(red: 0.62, green: 0.34, blue: 0.92))
             }
             .frame(maxWidth: 760)
             HStack {
@@ -310,9 +326,7 @@ struct SessionResultsView: View {
             Spacer()
         }
         .padding(32)
-        .background(
-            LinearGradient(colors: [Color.accentColor.opacity(0.06), .clear], startPoint: .top, endPoint: .center)
-        )
+        .background(ZetaBackground())
     }
 
     private var session: PracticeSession? { engine.completedSession }

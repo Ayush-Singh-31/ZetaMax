@@ -1,7 +1,18 @@
 import SwiftUI
 
+private struct ZetaReduceMotionOverrideKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var zetaReduceMotionOverride: Bool {
+        get { self[ZetaReduceMotionOverrideKey.self] }
+        set { self[ZetaReduceMotionOverrideKey.self] = newValue }
+    }
+}
+
 enum ZetaTheme {
-    static let screenWidth: CGFloat = 1_240
+    static let screenWidth: CGFloat = 1_520
     static let cornerRadius: CGFloat = 16
     static let compactRadius: CGFloat = 12
     static let pagePadding: CGFloat = 22
@@ -12,6 +23,11 @@ enum ZetaTheme {
     static let positive = Color(red: 0.10, green: 0.64, blue: 0.48)
     static let caution = Color(red: 0.93, green: 0.55, blue: 0.14)
     static let negative = Color(red: 0.88, green: 0.28, blue: 0.35)
+    static let selectionGradient = LinearGradient(
+        colors: [brand.opacity(0.18), cyan.opacity(0.09)],
+        startPoint: .leading,
+        endPoint: .trailing
+    )
 
     static func color(for operation: ArithmeticOperation) -> Color {
         switch operation {
@@ -78,18 +94,15 @@ struct ZetaScreen<Content: View>: View {
 }
 
 struct ZetaPageHeader: View {
-    let eyebrow: String
     let title: String
     var subtitle: String? = nil
     var systemImage = "sparkles"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(eyebrow.uppercased(), systemImage: systemImage)
-                .font(.caption.weight(.bold))
-                .tracking(0.8)
-                .foregroundStyle(ZetaTheme.brand)
-            Text(title).font(.largeTitle.weight(.bold))
+            Label(title, systemImage: systemImage)
+                .font(.largeTitle.weight(.bold))
+                .symbolRenderingMode(.hierarchical)
             if let subtitle {
                 Text(subtitle)
                     .font(.callout)
@@ -114,10 +127,9 @@ struct ZetaSectionHeader: View {
 }
 
 struct ZetaCard<Content: View>: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
-
-    private var increaseContrast: Bool { colorSchemeContrast == .increased }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.zetaReduceMotionOverride) private var reduceMotionOverride
+    @State private var isHovered = false
     @ViewBuilder let content: Content
 
     init(@ViewBuilder content: () -> Content) { self.content = content() }
@@ -126,12 +138,46 @@ struct ZetaCard<Content: View>: View {
         content
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(reduceTransparency ? AnyShapeStyle(Color(nsColor: .controlBackgroundColor)) : AnyShapeStyle(.regularMaterial), in: RoundedRectangle(cornerRadius: ZetaTheme.cornerRadius, style: .continuous))
+            .zetaLayeredSurface(cornerRadius: ZetaTheme.cornerRadius)
+            .scaleEffect(isHovered ? 1.002 : 1)
+            .animation(reduceMotion || reduceMotionOverride ? nil : .easeOut(duration: 0.15), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
+private struct ZetaLayeredSurfaceModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.colorScheme) private var colorScheme
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background(
+                reduceTransparency
+                    ? AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+                    : AnyShapeStyle(.regularMaterial),
+                in: shape
+            )
             .overlay {
-                RoundedRectangle(cornerRadius: ZetaTheme.cornerRadius, style: .continuous)
-                    .strokeBorder(.primary.opacity(increaseContrast ? 0.22 : 0.09))
+                shape.strokeBorder(.primary.opacity(colorSchemeContrast == .increased ? 0.26 : 0.10), lineWidth: 1)
             }
-            .shadow(color: increaseContrast ? .clear : .black.opacity(0.055), radius: 14, y: 5)
+            .overlay {
+                shape.inset(by: 1).strokeBorder(.white.opacity(colorScheme == .dark ? 0.06 : 0.34), lineWidth: 1)
+            }
+            .clipShape(shape)
+            .shadow(
+                color: colorSchemeContrast == .increased ? .clear : .black.opacity(colorScheme == .dark ? 0.22 : 0.07),
+                radius: colorScheme == .dark ? 18 : 14,
+                y: 6
+            )
+    }
+}
+
+extension View {
+    func zetaLayeredSurface(cornerRadius: CGFloat = ZetaTheme.cornerRadius) -> some View {
+        modifier(ZetaLayeredSurfaceModifier(cornerRadius: cornerRadius))
     }
 }
 

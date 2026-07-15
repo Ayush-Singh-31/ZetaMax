@@ -2,6 +2,28 @@ import CoreGraphics
 import XCTest
 
 final class ZetaMaxUITests: XCTestCase {
+    func testOneDigitNativeFieldClearsAndAdvancesOnceWhileWrongDigitStaysEditable() throws {
+        let app = launch(extraArguments: ["-ui-testing-one-digit"])
+        app.buttons["startSessionButton"].click()
+        let answer = app.textFields["answerField"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 5))
+        let questionText = question(in: app)
+        XCTAssertTrue(questionText.waitForExistence(timeout: 2))
+        let originalPrompt = questionText.label
+
+        answer.typeText("0")
+        XCTAssertEqual(answer.value as? String, "0")
+        XCTAssertEqual(questionText.label, originalPrompt)
+
+        answer.typeKey("a", modifierFlags: [.command])
+        let expected = try XCTUnwrap(expectedAnswer(for: originalPrompt))
+        XCTAssertEqual(expected.count, 1)
+        answer.typeText(expected)
+        XCTAssertTrue(waitForQuestionToChange(questionText, from: originalPrompt))
+        XCTAssertEqual(answer.value as? String, "")
+        XCTAssertEqual(app.staticTexts["practiceScore"].label, "1")
+    }
+
     func testCorrectAnswerAutoAdvancesAndReturnIsInert() throws {
         let app = launch()
         let start = app.buttons["startSessionButton"]
@@ -44,11 +66,24 @@ final class ZetaMaxUITests: XCTestCase {
         }
     }
 
+    func testReduceMotionKeepsPracticeQuestionTransitionFunctional() throws {
+        let app = launch(extraArguments: ["-ui-testing-one-digit", "-ui-testing-reduce-motion"])
+        app.buttons["startSessionButton"].click()
+        let answer = app.textFields["answerField"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 5))
+        let questionText = question(in: app)
+        XCTAssertTrue(questionText.waitForExistence(timeout: 2))
+        let prompt = questionText.label
+        answer.typeText(try XCTUnwrap(expectedAnswer(for: prompt)))
+        XCTAssertTrue(waitForQuestionToChange(questionText, from: prompt))
+        XCTAssertEqual(app.staticTexts["practiceScore"].label, "1")
+    }
+
     func testEveryAnalyticsSectionRendersFromTheSharedFixture() throws {
         let sections: [(String, String, String, String)] = [
-            ("Overview", "analyticsOverviewSection", "Performance over time", "Analytics · Overview"),
-            ("Skills", "analyticsSkillsSection", "Operation timing", "Analytics · Skills"),
-            ("Distribution", "analyticsDistributionSection", "Response-time distribution", "Analytics · Distribution"),
+            ("Overview", "analyticsOverviewSection", "Performance trend", "Analytics · Overview"),
+            ("Skills", "analyticsSkillsSection", "Skills by operation and category", "Analytics · Skills"),
+            ("Distribution", "analyticsDistributionSection", "Response-time histogram", "Analytics · Distribution"),
             ("Benchmarks", "analyticsBenchmarksSection", "Benchmark outlook", "Analytics · Benchmarks")
         ]
 
@@ -61,6 +96,90 @@ final class ZetaMaxUITests: XCTestCase {
             assertInsideWindow(app.staticTexts[marker].firstMatch, app: app)
             attachScreenshot(app, name: screenshotName)
             XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'accuracy' OR label CONTAINS[c] 'error rate'")).firstMatch.exists)
+            XCTAssertFalse(app.staticTexts["Granularity"].exists)
+            XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'Train arithmetic' OR label CONTAINS[c] 'Performance lab' OR label CONTAINS[c] 'What should I practise'")).firstMatch.exists)
+            app.terminate()
+        }
+    }
+
+    func testEveryAnalyticsSectionAtCompactMediumAndWideSizesInBothThemes() throws {
+        let appearances = ["-ui-testing-light", "-ui-testing-dark"]
+        let sizes = ["-ui-testing-compact", "-ui-testing-medium", "-ui-testing-wide"]
+        let sections: [(String, String)] = [
+            ("Overview", "analyticsOverviewSection"),
+            ("Skills", "analyticsSkillsSection"),
+            ("Distribution", "analyticsDistributionSection"),
+            ("Benchmarks", "analyticsBenchmarksSection")
+        ]
+
+        for appearance in appearances {
+            for size in sizes {
+                let app = launch(extraArguments: ["-ui-testing-analytics", appearance, size])
+                app.typeKey("3", modifierFlags: [.command])
+                XCTAssertTrue(app.descendants(matching: .any)["analyticsSectionPicker"].waitForExistence(timeout: 8))
+                for (section, identifier) in sections {
+                    let segment = app.descendants(matching: .any)
+                        .matching(NSPredicate(format: "label == %@", section))
+                        .firstMatch
+                    XCTAssertTrue(segment.exists)
+                    segment.click()
+                    let marker = app.descendants(matching: .any)[identifier]
+                    XCTAssertTrue(marker.waitForExistence(timeout: 5), "Missing \(section) at \(size) in \(appearance)")
+                    assertInsideWindow(marker, app: app)
+                    XCTAssertFalse(app.staticTexts["Granularity"].exists)
+                }
+                app.terminate()
+            }
+        }
+    }
+
+    func testRepeatedSidebarSwitchingUsesCachedDestinations() throws {
+        let app = launch(extraArguments: ["-ui-testing-analytics", "-ui-testing-wide"])
+        let destinations: [(String, String)] = [
+            ("3", "analyticsOverviewSection"),
+            ("2", "recommendationsScreen"),
+            ("4", "historyWideList"),
+            ("3", "analyticsOverviewSection")
+        ]
+        for _ in 0..<3 {
+            for (shortcut, identifier) in destinations {
+                app.typeKey(shortcut, modifierFlags: [.command])
+                XCTAssertTrue(app.descendants(matching: .any)[identifier].waitForExistence(timeout: 2))
+            }
+        }
+    }
+
+    func testAppearanceCanBeChangedFromSettings() throws {
+        let app = launch(extraArguments: ["-ui-testing-medium"])
+        app.typeKey("5", modifierFlags: [.command])
+        let picker = app.descendants(matching: .any)["settingsAppearancePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        let dark = app.buttons["Dark"]
+        XCTAssertTrue(dark.exists)
+        dark.click()
+        XCTAssertTrue(dark.isSelected)
+    }
+
+    func testRecommendationCardsShareAlignmentAtRegularAndCompactWidths() throws {
+        for (size, compact) in [("-ui-testing-medium", false), ("-ui-testing-compact", true)] {
+            let app = launch(extraArguments: ["-ui-testing-analytics", size])
+            app.typeKey("2", modifierFlags: [.command])
+            let cards = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH 'recommendationCard-'"))
+            XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 8))
+            let visibleCards = cards.allElementsBoundByIndex
+            XCTAssertFalse(visibleCards.isEmpty)
+            if compact {
+                let button = app.buttons["Start session"].firstMatch
+                XCTAssertGreaterThanOrEqual(button.frame.width, visibleCards[0].frame.width - 60)
+            } else {
+                let heights = visibleCards.map(\.frame.height)
+                XCTAssertLessThanOrEqual((heights.max() ?? 0) - (heights.min() ?? 0), 2)
+                let buttons = app.buttons.matching(NSPredicate(format: "label == 'Start session'")).allElementsBoundByIndex
+                for (card, button) in zip(visibleCards, buttons) {
+                    XCTAssertLessThan(abs(card.frame.midY - button.frame.midY), 28)
+                }
+            }
             app.terminate()
         }
     }

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let repository: SwiftDataRepository
+    @Binding var appearance: AppAppearance
     @Query private var sessions: [PracticeSession]
     @State private var resetPresented = false
     @State private var exportDocument: ExportDocument?
@@ -16,11 +17,22 @@ struct SettingsView: View {
         ZetaScreen(maxWidth: 820) {
             VStack(alignment: .leading, spacing: ZetaTheme.sectionSpacing) {
                 ZetaPageHeader(
-                    eyebrow: "Local control",
                     title: "Settings",
-                    subtitle: "Your practice history stays on this Mac.",
-                    systemImage: "lock.shield.fill"
+                    systemImage: "gearshape.fill"
                 )
+
+                ZetaCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Appearance", systemImage: "circle.lefthalf.filled").font(.headline)
+                        Picker("Appearance", selection: $appearance) {
+                            ForEach(AppAppearance.allCases) { option in
+                                Label(option.title, systemImage: option.systemImage).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("settingsAppearancePicker")
+                    }
+                }
 
                 ZetaCard {
                     VStack(alignment: .leading, spacing: 14) {

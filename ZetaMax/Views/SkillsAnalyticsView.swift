@@ -1,232 +1,401 @@
 import Charts
 import SwiftUI
 
-private enum CategoryRankMetric: String, CaseIterable, Identifiable {
-    case median = "Median", p90 = "P90", difficulty = "Difficulty", change = "Recent change"
-    var id: String { rawValue }
-}
-
-private enum CategorySort: String, CaseIterable, Identifiable {
-    case slowest = "Slowest first", mostSamples = "Most samples", recentSlowdown = "Recent slowdown"
-    var id: String { rawValue }
-}
-
-private enum SkillHeatmapMetric: String, CaseIterable, Identifiable {
-    case median = "Median", p90 = "P90", count = "Samples"
+private enum OperandMetric: String, CaseIterable, Identifiable {
+    case median = "Median"
+    case p90 = "P90"
+    case count = "Sample count"
     var id: String { rawValue }
 }
 
 struct SkillsAnalyticsView: View {
     let snapshot: DashboardSnapshot
-    @State private var selectedOperation: ArithmeticOperation?
-    @State private var categoryMetric: CategoryRankMetric = .median
-    @State private var categorySort: CategorySort = .slowest
-    @State private var minimumSamples = 1.0
-    @State private var selectedCategoryID: String?
-    @State private var selectedDifficulty: Double?
-    @State private var heatmapMetric: SkillHeatmapMetric = .median
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.zetaReduceMotionOverride) private var reduceMotionOverride
+    @State private var selectedChangeValue: Double?
+    @State private var selectedOperandOperation: ArithmeticOperation?
+    @State private var selectedOperandPrimary: String?
+    @State private var selectedOperandCellID: String?
+    @State private var operandMetric: OperandMetric = .median
 
     var body: some View {
         VStack(alignment: .leading, spacing: ZetaTheme.sectionSpacing) {
-            operationCard
-            categoryCard
-            effortMapCard
-            heatmapCard
+            hierarchyCard
+            recentChangeCard
+            operandExplorerCard
         }
-    }
-
-    private var operationCard: some View {
-        ZetaChartCard(title: "Operation timing", subtitle: "Each line spans median to P90. Pick an operation to cross-filter the category panels.") {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Selected operation", selection: $selectedOperation) {
-                    Text("All operations").tag(ArithmeticOperation?.none)
-                    ForEach(ArithmeticOperation.allCases) { operation in
-                        Label(operation.title, systemImage: ZetaTheme.systemImage(for: operation)).tag(Optional(operation))
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                Chart(snapshot.operations) { metric in
-                    BarMark(
-                        xStart: .value("Median", metric.medianMilliseconds / 1_000),
-                        xEnd: .value("P90", metric.p90Milliseconds / 1_000),
-                        y: .value("Operation", metric.operation.title),
-                        height: .fixed(7)
-                    )
-                    .foregroundStyle(ZetaTheme.color(for: metric.operation).opacity(selectedOperation == nil || selectedOperation == metric.operation ? 0.78 : 0.22))
-                    PointMark(x: .value("Median", metric.medianMilliseconds / 1_000), y: .value("Operation", metric.operation.title))
-                        .foregroundStyle(ZetaTheme.color(for: metric.operation)).symbol(.circle)
-                    PointMark(x: .value("P90", metric.p90Milliseconds / 1_000), y: .value("Operation", metric.operation.title))
-                        .foregroundStyle(ZetaTheme.color(for: metric.operation)).symbol(.diamond)
-                        .annotation(position: .trailing) { Text("n=\(metric.attempts)").font(.caption2).foregroundStyle(.secondary) }
-                }
-                .chartXAxisLabel("Seconds · ● median  ◆ P90")
-                .chartLegend(.hidden)
-                .frame(height: max(180, CGFloat(snapshot.operations.count) * 46))
-                .accessibilityLabel("Operation timing ranges")
-                .accessibilityValue(snapshot.operations.map { "\($0.operation.title), median \(AnalyticsFormatting.time($0.medianMilliseconds)), P90 \(AnalyticsFormatting.time($0.p90Milliseconds)), \($0.attempts) samples" }.joined(separator: ". "))
+        .onAppear {
+            if selectedOperandOperation == nil {
+                selectedOperandOperation = snapshot.operandExplorers.first?.operation
             }
         }
     }
 
-    private var categoryCard: some View {
-        ZetaChartCard(title: "Ranked categories", subtitle: "Low-sample categories are shown for exploration but are not diagnosed as weaknesses.") {
-            VStack(alignment: .leading, spacing: 13) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { categoryControls }
-                    VStack(alignment: .leading, spacing: 9) { categoryControls }
+    private var hierarchyCard: some View {
+        ZetaChartCard(title: "Skills by operation and category") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 16) {
+                    Label("Median", systemImage: "rectangle.fill").foregroundStyle(ZetaTheme.brand)
+                    Label("P90", systemImage: "diamond.fill").foregroundStyle(.secondary)
+                    Label("Personal baseline", systemImage: "line.diagonal").foregroundStyle(ZetaTheme.caution)
+                    Spacer()
+                    Text("Sample count").frame(width: 78, alignment: .trailing)
                 }
-                if rankedCategories.isEmpty {
-                    Text("No categories match the current minimum sample count.").foregroundStyle(.secondary).padding(.vertical, 28)
-                } else {
-                    VStack(spacing: 7) {
-                        ForEach(Array(rankedCategories.prefix(14).enumerated()), id: \.element.id) { index, metric in
-                            Button { selectedCategoryID = metric.id } label: {
-                                CategoryRankRow(rank: index + 1, metric: metric, value: categoryValue(metric), valueLabel: categoryValueLabel(metric), maximum: categoryMaximum, isSelected: selectedCategoryID == metric.id)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Text("Response time (seconds)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 7) {
+                        ForEach(snapshot.operations) { operation in
+                            SkillTimingRow(
+                                name: operation.operation.title,
+                                operation: operation.operation,
+                                medianMilliseconds: operation.medianMilliseconds,
+                                p90Milliseconds: operation.p90Milliseconds,
+                                baselineMilliseconds: operation.baselineMilliseconds,
+                                sampleCount: operation.attempts,
+                                maximumMilliseconds: hierarchyMaximum,
+                                isSummary: true
+                            )
+                            ForEach(categories(for: operation.operation)) { category in
+                                SkillTimingRow(
+                                    name: category.name,
+                                    operation: category.operation,
+                                    medianMilliseconds: category.medianMilliseconds,
+                                    p90Milliseconds: category.p90Milliseconds,
+                                    baselineMilliseconds: category.baselineMilliseconds,
+                                    sampleCount: category.attempts,
+                                    maximumMilliseconds: hierarchyMaximum,
+                                    isSummary: false
+                                )
                             }
-                            .buttonStyle(.plain)
                         }
                     }
+                    .padding(.vertical, 2)
                 }
+                .frame(height: 340)
+                .accessibilityLabel("Hierarchical skill timing bars")
             }
         }
     }
 
-    @ViewBuilder private var categoryControls: some View {
-        Picker("Metric", selection: $categoryMetric) { ForEach(CategoryRankMetric.allCases) { Text($0.rawValue).tag($0) } }.frame(maxWidth: 190)
-        Picker("Sort", selection: $categorySort) { ForEach(CategorySort.allCases) { Text($0.rawValue).tag($0) } }.frame(maxWidth: 190)
-        HStack {
-            Text("Min n").font(.caption).foregroundStyle(.secondary)
-            Slider(value: $minimumSamples, in: 1...30, step: 1).frame(width: 100)
-            Text("\(Int(minimumSamples))").font(.caption.monospacedDigit()).frame(width: 22)
-        }
-    }
-
-    private var effortMapCard: some View {
-        ZetaChartCard(title: "Difficulty and momentum", subtitle: "Right is slower than your typical question; above zero is recent improvement. Bubble size reflects sample count.") {
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("Category to inspect", selection: $selectedCategoryID) {
-                    Text("Choose a category").tag(String?.none)
-                    ForEach(effortCategories) { Text($0.name).tag(Optional($0.id)) }
-                }
-                .pickerStyle(.menu)
-                .frame(maxWidth: 340, alignment: .leading)
-
+    private var recentChangeCard: some View {
+        ZetaChartCard(
+            title: "Recent category change",
+            subtitle: "Faster categories are positive; slower categories are negative."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
                 Chart {
-                    RuleMark(x: .value("Typical difficulty", 100)).foregroundStyle(.secondary.opacity(0.45)).lineStyle(StrokeStyle(dash: [5, 4]))
-                    RuleMark(y: .value("No change", 0)).foregroundStyle(.secondary.opacity(0.45)).lineStyle(StrokeStyle(dash: [5, 4]))
-                    ForEach(effortCategories) { metric in
-                        PointMark(x: .value("Difficulty index", metric.difficultyIndex), y: .value("Recent change", metric.recentSpeedChange ?? 0))
-                            .foregroundStyle(ZetaTheme.color(for: metric.operation))
-                            .symbolSize(selectedCategoryID == metric.id ? 180 : min(max(Double(metric.attempts) * 5, 45), 135))
-                            .annotation(position: .top, overflowResolution: .init(x: .fit, y: .fit)) {
-                                if selectedCategoryID == metric.id { categoryTooltip(metric) }
-                            }
+                    RuleMark(x: .value("No change", 0))
+                        .foregroundStyle(.secondary.opacity(0.55))
+                        .lineStyle(StrokeStyle(lineWidth: 1.2))
+                    ForEach(changeCategories) { category in
+                        BarMark(
+                            xStart: .value("Change", 0),
+                            xEnd: .value("Change", category.recentSpeedChange ?? 0),
+                            y: .value("Category", shortName(category.name))
+                        )
+                        .foregroundStyle((category.recentSpeedChange ?? 0) >= 0 ? ZetaTheme.positive : ZetaTheme.caution)
                     }
                 }
-                .chartXSelection(value: $selectedDifficulty)
-                .onChange(of: selectedDifficulty) { _, value in
-                    guard let value else { return }
-                    selectedCategoryID = effortCategories.min(by: { abs($0.difficultyIndex - value) < abs($1.difficultyIndex - value) })?.id
-                }
-                .chartXAxisLabel("Difficulty index · 100 is typical")
-                .chartYAxisLabel("Recent pace change %")
+                .chartXSelection(value: $selectedChangeValue)
+                .chartXAxisLabel("Recent speed change (percent)")
+                .chartYAxisLabel("Category")
                 .chartLegend(.hidden)
-                .chartBackground { _ in
-                    GeometryReader { proxy in
-                        ZStack {
-                            Text("Improving · easier").position(x: 66, y: 12)
-                            Text("Improving · harder").position(x: max(proxy.size.width - 68, 68), y: 12)
-                            Text("Slowing · easier").position(x: 62, y: max(proxy.size.height - 12, 12))
-                            Text("Slowing · harder").position(x: max(proxy.size.width - 66, 66), y: max(proxy.size.height - 12, 12))
-                        }.font(.caption2).foregroundStyle(.tertiary)
+                .frame(height: 330)
+                .animation(reduceMotion || reduceMotionOverride ? nil : .easeOut(duration: 0.16), value: snapshot.categories)
+                .accessibilityLabel("Recent category change")
+
+                HStack(spacing: 16) {
+                    Label("Faster", systemImage: "arrow.right").foregroundStyle(ZetaTheme.positive)
+                    Label("Slower", systemImage: "arrow.left").foregroundStyle(ZetaTheme.caution)
+                    Spacer()
+                    if let selectedChangeCategory {
+                        Text("\(selectedChangeCategory.name) · \(AnalyticsFormatting.signedPercent(selectedChangeCategory.recentSpeedChange))")
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    } else {
+                        Text("Select a bar")
                     }
                 }
-                .frame(height: 310)
-                .accessibilityLabel("Category difficulty and momentum map")
-                .accessibilityValue("\(effortCategories.count) statistically supported categories")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(minHeight: 22)
             }
         }
     }
 
-    private var heatmapCard: some View {
-        ZetaChartCard(title: snapshot.heatmapPresentation == .grid ? "Multiplication heatmap" : "Multiplication pairs", subtitle: snapshot.heatmapPresentation == .grid ? "Color and labels show the selected timing metric." : "Sparse data is ranked as observed pairs instead of implying a complete grid.") {
+    private var operandExplorerCard: some View {
+        ZetaChartCard(title: "Operand explorer") {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Heatmap metric", selection: $heatmapMetric) { ForEach(SkillHeatmapMetric.allCases) { Text($0.rawValue).tag($0) } }
-                    .pickerStyle(.segmented).frame(maxWidth: 360)
-                switch snapshot.heatmapPresentation {
-                case .grid:
-                    Chart(snapshot.heatmap) { cell in
-                        RectangleMark(xStart: .value("Left start", Double(cell.left) - 0.45), xEnd: .value("Left end", Double(cell.left) + 0.45), yStart: .value("Right start", Double(cell.right) - 0.45), yEnd: .value("Right end", Double(cell.right) + 0.45))
-                            .foregroundStyle(ZetaTheme.color(for: .multiplication).opacity(heatmapOpacity(cell)))
-                            .annotation(position: .overlay) { Text(heatmapLabel(cell)).font(.caption2).monospacedDigit() }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { operandControls; Spacer() }
+                    VStack(alignment: .leading, spacing: 9) { operandControls }
+                }
+
+                if let explorer = selectedExplorer {
+                    switch explorer.presentation {
+                    case .grid:
+                        operandGrid(explorer)
+                    case .rankedPairs:
+                        rankedOperands(explorer)
+                    case .insufficient:
+                        ContentUnavailableView(
+                            "Not enough operand data",
+                            systemImage: "square.grid.3x3",
+                            description: Text("Complete more questions for this operation.")
+                        )
+                        .frame(height: 250)
                     }
-                    .chartXAxisLabel("Left operand").chartYAxisLabel("Right operand").frame(height: 340)
-                    .accessibilityLabel("Multiplication heatmap, \(heatmapMetric.rawValue)")
-                case .rankedPairs:
-                    VStack(spacing: 7) {
-                        ForEach(snapshot.heatmap.sorted { heatmapValue($0) > heatmapValue($1) }.prefix(14)) { cell in
-                            HStack {
-                                Label("\(cell.left) × \(cell.right)", systemImage: "multiply").font(.body.monospacedDigit())
-                                Spacer(); Text(heatmapLabel(cell)).bold().monospacedDigit()
-                                Text("n=\(cell.count)").font(.caption).foregroundStyle(.secondary).frame(width: 46, alignment: .trailing)
-                            }.padding(.vertical, 5)
-                            Divider()
-                        }
-                    }
-                case .insufficient:
-                    ContentUnavailableView("Not enough multiplication data", systemImage: "square.grid.3x3", description: Text("Complete multiplication questions to build this view.")).frame(height: 190)
+                } else {
+                    ContentUnavailableView(
+                        "No operand data",
+                        systemImage: "number",
+                        description: Text("Complete a session to build this view.")
+                    )
+                    .frame(height: 250)
                 }
             }
         }
     }
 
-    private var filteredCategories: [CategoryMetric] { snapshot.categories.filter { ($0.operation == selectedOperation || selectedOperation == nil) && $0.attempts >= Int(minimumSamples) } }
-    private var rankedCategories: [CategoryMetric] {
-        filteredCategories.sorted {
-            switch categorySort {
-            case .slowest: categoryValue($0) > categoryValue($1)
-            case .mostSamples: $0.attempts > $1.attempts
-            case .recentSlowdown: ($0.recentSpeedChange ?? 0) < ($1.recentSpeedChange ?? 0)
+    @ViewBuilder
+    private var operandControls: some View {
+        Picker("Operation", selection: $selectedOperandOperation) {
+            ForEach(snapshot.operandExplorers) { explorer in
+                Label(explorer.operation.title, systemImage: ZetaTheme.systemImage(for: explorer.operation))
+                    .tag(Optional(explorer.operation))
             }
         }
+        .frame(maxWidth: 230)
+        .onChange(of: selectedOperandOperation) { _, _ in
+            selectedOperandPrimary = nil
+            selectedOperandCellID = nil
+        }
+        Picker("Metric", selection: $operandMetric) {
+            ForEach(OperandMetric.allCases) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .frame(maxWidth: 390)
+        .onChange(of: operandMetric) { _, _ in
+            selectedOperandPrimary = nil
+            selectedOperandCellID = nil
+        }
     }
-    private var categoryMaximum: Double { max(rankedCategories.map(categoryValue).max() ?? 1, 1) }
-    private func categoryValue(_ metric: CategoryMetric) -> Double {
-        switch categoryMetric { case .median: metric.medianMilliseconds; case .p90: metric.p90Milliseconds; case .difficulty: metric.difficultyIndex; case .change: abs(metric.recentSpeedChange ?? 0) }
+
+    private func operandGrid(_ explorer: OperandExplorerResult) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Chart(explorer.cells) { cell in
+                RectangleMark(
+                    x: .value(explorer.horizontalAxis.title, cell.primaryLabel),
+                    y: .value(explorer.verticalAxis?.title ?? "Operand", cell.secondaryLabel ?? "")
+                )
+                .foregroundStyle(ZetaTheme.color(for: explorer.operation).opacity(operandOpacity(cell, in: explorer.cells)))
+            }
+            .chartXSelection(value: $selectedOperandPrimary)
+            .chartXAxisLabel(explorer.horizontalAxis.title)
+            .chartYAxisLabel(explorer.verticalAxis?.title ?? "Operand")
+            .chartLegend(.hidden)
+            .frame(height: 330)
+            .animation(reduceMotion || reduceMotionOverride ? nil : .easeOut(duration: 0.16), value: operandMetric)
+            .accessibilityLabel("\(explorer.operation.title) operand heatmap, \(operandMetric.rawValue)")
+
+            HStack {
+                Label(operandMetric.rawValue, systemImage: "square.fill")
+                    .foregroundStyle(ZetaTheme.color(for: explorer.operation))
+                Spacer()
+                if let cell = selectedGridCell(explorer) {
+                    Text("\(cell.pairLabel) · \(operandValueLabel(cell)) · n=\(cell.count)")
+                        .monospacedDigit()
+                } else {
+                    Text("Select a column")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(minHeight: 22)
+        }
     }
-    private func categoryValueLabel(_ metric: CategoryMetric) -> String {
-        switch categoryMetric { case .median: AnalyticsFormatting.time(metric.medianMilliseconds); case .p90: AnalyticsFormatting.time(metric.p90Milliseconds); case .difficulty: "D\(Int(metric.difficultyIndex.rounded()))"; case .change: AnalyticsFormatting.signedPercent(metric.recentSpeedChange) }
+
+    private func rankedOperands(_ explorer: OperandExplorerResult) -> some View {
+        VStack(spacing: 7) {
+            ForEach(rankedCells(explorer)) { cell in
+                Button { selectedOperandCellID = cell.id } label: {
+                    HStack(spacing: 12) {
+                        Label(cell.pairLabel, systemImage: ZetaTheme.systemImage(for: explorer.operation))
+                            .font(.body.monospacedDigit())
+                        Spacer()
+                        Text(operandValueLabel(cell)).bold().monospacedDigit()
+                        Text("n=\(cell.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 58, alignment: .trailing)
+                    }
+                    .padding(9)
+                    .background(selectedOperandCellID == cell.id ? ZetaTheme.selectionGradient : LinearGradient(colors: [.clear], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 9))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack {
+                Text("Top 12 by \(operandMetric.rawValue.lowercased())")
+                Spacer()
+                if let cell = selectedRankedCell(explorer) {
+                    Text("\(cell.pairLabel) · median \(AnalyticsFormatting.time(cell.medianMilliseconds)) · P90 \(AnalyticsFormatting.time(cell.p90Milliseconds)) · n=\(cell.count)")
+                        .monospacedDigit()
+                } else {
+                    Text("Select a row")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(minHeight: 24)
+        }
     }
-    private var effortCategories: [CategoryMetric] { snapshot.categories.filter { $0.attempts >= 10 && $0.recentSpeedChange != nil && (selectedOperation == nil || $0.operation == selectedOperation) } }
-    private func categoryTooltip(_ metric: CategoryMetric) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(metric.name).font(.caption.bold()).lineLimit(2)
-            Text("D\(Int(metric.difficultyIndex.rounded())) · \(AnalyticsFormatting.signedPercent(metric.recentSpeedChange)) · n=\(metric.attempts)").font(.caption2).monospacedDigit()
-        }.padding(7).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+
+    private var hierarchyMaximum: Double {
+        max(
+            snapshot.operations.flatMap { [$0.medianMilliseconds, $0.p90Milliseconds, $0.baselineMilliseconds] }.max() ?? 1,
+            snapshot.categories.flatMap { [$0.medianMilliseconds, $0.p90Milliseconds, $0.baselineMilliseconds] }.max() ?? 1
+        )
     }
-    private func heatmapValue(_ cell: HeatmapCell) -> Double { switch heatmapMetric { case .median: cell.medianMilliseconds; case .p90: cell.p90Milliseconds; case .count: Double(cell.count) } }
-    private func heatmapLabel(_ cell: HeatmapCell) -> String { switch heatmapMetric { case .median: AnalyticsFormatting.time(cell.medianMilliseconds); case .p90: AnalyticsFormatting.time(cell.p90Milliseconds); case .count: String(cell.count) } }
-    private func heatmapOpacity(_ cell: HeatmapCell) -> Double { min(max(heatmapValue(cell) / max(snapshot.heatmap.map(heatmapValue).max() ?? 1, 1), 0.14), 0.9) }
+
+    private func categories(for operation: ArithmeticOperation) -> [CategoryMetric] {
+        snapshot.categories
+            .filter { $0.operation == operation }
+            .sorted { $0.name < $1.name }
+    }
+
+    private var changeCategories: [CategoryMetric] {
+        Array(
+            snapshot.categories
+                .filter { $0.recentSpeedChange != nil }
+                .sorted { abs($0.recentSpeedChange ?? 0) > abs($1.recentSpeedChange ?? 0) }
+                .prefix(14)
+        )
+    }
+
+    private var selectedChangeCategory: CategoryMetric? {
+        guard let selectedChangeValue else { return nil }
+        return changeCategories.min {
+            abs(($0.recentSpeedChange ?? 0) - selectedChangeValue)
+                < abs(($1.recentSpeedChange ?? 0) - selectedChangeValue)
+        }
+    }
+
+    private var selectedExplorer: OperandExplorerResult? {
+        snapshot.operandExplorers.first { $0.operation == selectedOperandOperation }
+            ?? snapshot.operandExplorers.first
+    }
+
+    private func operandValue(_ cell: OperandMetricCell) -> Double {
+        switch operandMetric {
+        case .median: cell.medianMilliseconds
+        case .p90: cell.p90Milliseconds
+        case .count: Double(cell.count)
+        }
+    }
+
+    private func operandValueLabel(_ cell: OperandMetricCell) -> String {
+        switch operandMetric {
+        case .median: AnalyticsFormatting.time(cell.medianMilliseconds)
+        case .p90: AnalyticsFormatting.time(cell.p90Milliseconds)
+        case .count: String(cell.count)
+        }
+    }
+
+    private func operandOpacity(_ cell: OperandMetricCell, in cells: [OperandMetricCell]) -> Double {
+        let maximum = max(cells.map(operandValue).max() ?? 1, 1)
+        return min(max(operandValue(cell) / maximum, 0.14), 0.92)
+    }
+
+    private func rankedCells(_ explorer: OperandExplorerResult) -> [OperandMetricCell] {
+        Array(explorer.cells.sorted { operandValue($0) > operandValue($1) }.prefix(12))
+    }
+
+    private func selectedGridCell(_ explorer: OperandExplorerResult) -> OperandMetricCell? {
+        guard let selectedOperandPrimary else { return nil }
+        return explorer.cells
+            .filter { $0.primaryLabel == selectedOperandPrimary }
+            .max { operandValue($0) < operandValue($1) }
+    }
+
+    private func selectedRankedCell(_ explorer: OperandExplorerResult) -> OperandMetricCell? {
+        explorer.cells.first { $0.id == selectedOperandCellID }
+    }
+
+    private func shortName(_ name: String) -> String {
+        name.split(separator: "·").last.map { String($0).trimmingCharacters(in: .whitespaces) } ?? name
+    }
 }
 
-private struct CategoryRankRow: View {
-    let rank: Int; let metric: CategoryMetric; let value: Double; let valueLabel: String; let maximum: Double; let isSelected: Bool
+private struct SkillTimingRow: View {
+    let name: String
+    let operation: ArithmeticOperation
+    let medianMilliseconds: Double
+    let p90Milliseconds: Double
+    let baselineMilliseconds: Double
+    let sampleCount: Int
+    let maximumMilliseconds: Double
+    let isSummary: Bool
+
     var body: some View {
         HStack(spacing: 10) {
-            Text("\(rank)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22, alignment: .trailing)
-            Image(systemName: ZetaTheme.systemImage(for: metric.operation)).foregroundStyle(ZetaTheme.color(for: metric.operation)).frame(width: 18)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(metric.name).lineLimit(1).help(metric.name)
-                    if metric.isLowSample { Image(systemName: "exclamationmark.circle").foregroundStyle(ZetaTheme.caution).help("Low sample: n=\(metric.attempts)") }
-                    Spacer(); Text(valueLabel).bold().monospacedDigit(); Text("n=\(metric.attempts)").font(.caption2).foregroundStyle(.secondary).frame(width: 45, alignment: .trailing)
+            HStack(spacing: 7) {
+                if isSummary {
+                    Image(systemName: ZetaTheme.systemImage(for: operation))
+                        .foregroundStyle(ZetaTheme.color(for: operation))
+                } else {
+                    Color.clear.frame(width: 18)
                 }
-                GeometryReader { geometry in
-                    Capsule().fill(.quaternary).overlay(alignment: .leading) { Capsule().fill(ZetaTheme.color(for: metric.operation)).frame(width: geometry.size.width * min(max(value / maximum, 0.02), 1)) }
-                }.frame(height: 5)
+                Text(name)
+                    .font(isSummary ? .callout.bold() : .caption)
+                    .lineLimit(1)
+                    .help(name)
             }
+            .frame(width: 220, alignment: .leading)
+
+            GeometryReader { geometry in
+                let width = max(geometry.size.width, 1)
+                let medianX = width * ratio(medianMilliseconds)
+                let p90X = width * ratio(p90Milliseconds)
+                let baselineX = width * ratio(baselineMilliseconds)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary)
+                    Capsule()
+                        .fill(ZetaTheme.color(for: operation).opacity(isSummary ? 0.88 : 0.62))
+                        .frame(width: max(medianX, 2))
+                    Rectangle()
+                        .fill(ZetaTheme.caution)
+                        .frame(width: 1.5)
+                        .offset(x: min(max(baselineX, 0), width - 1))
+                    Image(systemName: "diamond.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.primary)
+                        .offset(x: min(max(p90X - 4, 0), width - 8))
+                }
+            }
+            .frame(height: isSummary ? 13 : 9)
+
+            Text("n=\(sampleCount)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 78, alignment: .trailing)
         }
-        .padding(9).background(isSelected ? ZetaTheme.brand.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9)).contentShape(Rectangle()).accessibilityElement(children: .combine)
+        .padding(.horizontal, 8)
+        .frame(height: isSummary ? 34 : 28)
+        .background(isSummary ? ZetaTheme.color(for: operation).opacity(0.07) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(name), median \(AnalyticsFormatting.time(medianMilliseconds)), P90 \(AnalyticsFormatting.time(p90Milliseconds)), baseline \(AnalyticsFormatting.time(baselineMilliseconds)), \(sampleCount) samples")
+    }
+
+    private func ratio(_ value: Double) -> CGFloat {
+        CGFloat(min(max(value / max(maximumMilliseconds, 1), 0), 1))
     }
 }

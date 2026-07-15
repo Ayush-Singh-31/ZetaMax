@@ -6,8 +6,10 @@ import SwiftUI
 struct ZetaMaxApp: App {
     private let container: ModelContainer
     private let repository: SwiftDataRepository
+    private let analyticsStore: AnalyticsStore
     @State private var engine: SessionEngine
     @State private var navigation = NavigationModel()
+    @State private var appearance: AppAppearance
 
     init() {
         do {
@@ -22,6 +24,8 @@ struct ZetaMaxApp: App {
             }
             self.container = container
             self.repository = repository
+            self.analyticsStore = AnalyticsStore(container: container, revision: repository.revision)
+            _appearance = State(initialValue: AppAppearance.persisted())
             let engine = SessionEngine(repository: repository)
             if isUITesting {
                 var configuration = PracticeConfiguration.classicDefault
@@ -36,8 +40,13 @@ struct ZetaMaxApp: App {
                     configuration.targetedRange = OperandRange(2, 20)
                 } else {
                     configuration.operations = [.addition]
-                    configuration.additionLeft = OperandRange(2, 9)
-                    configuration.additionRight = OperandRange(2, 9)
+                    if arguments.contains("-ui-testing-one-digit") {
+                        configuration.additionLeft = OperandRange(2, 3)
+                        configuration.additionRight = OperandRange(2, 3)
+                    } else {
+                        configuration.additionLeft = OperandRange(2, 9)
+                        configuration.additionRight = OperandRange(2, 9)
+                    }
                 }
                 engine.configuration = configuration
             } else if let data = UserDefaults.standard.data(forKey: "lastPracticeConfiguration"),
@@ -52,12 +61,21 @@ struct ZetaMaxApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppRootView(engine: engine, navigation: navigation, repository: repository)
+            AppRootView(
+                engine: engine,
+                navigation: navigation,
+                repository: repository,
+                analyticsStore: analyticsStore,
+                appearance: $appearance
+            )
                 .modelContainer(container)
                 .onChange(of: engine.configuration) { _, configuration in
                     if let data = try? JSONEncoder().encode(configuration) {
                         UserDefaults.standard.set(data, forKey: "lastPracticeConfiguration")
                     }
+                }
+                .onChange(of: appearance) { _, appearance in
+                    appearance.persist()
                 }
         }
         .defaultSize(width: 1_100, height: 760)
@@ -113,9 +131,9 @@ struct ZetaMaxApp: App {
                 session.attempts.append(attempt)
                 let base = fixtureBaseMilliseconds(for: question)
                 let historicalShift = (5 - sessionIndex) * 70
-                let fatigue = position >= (questionCount * 4 / 5) ? 430 : (position >= questionCount * 3 / 5 ? 160 : 0)
+                let lateSessionAdjustment = position >= (questionCount * 4 / 5) ? 430 : (position >= questionCount * 3 / 5 ? 160 : 0)
                 let deterministicNoise = ((position * 137 + sessionIndex * 83) % 620) - 220
-                let response = max(420, base + historicalShift + fatigue + deterministicNoise)
+                let response = max(420, base + historicalShift + lateSessionAdjustment + deterministicNoise)
                 attempt.wasEventuallyCorrect = true
                 attempt.responseTimeMilliseconds = response
                 attempt.answeredAt = presentedAt.addingTimeInterval(Double(response) / 1_000)

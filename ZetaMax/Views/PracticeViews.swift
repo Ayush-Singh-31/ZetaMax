@@ -7,9 +7,7 @@ struct PracticeSetupView: View {
         ZetaScreen(maxWidth: 960) {
             VStack(alignment: .leading, spacing: 24) {
                 ZetaPageHeader(
-                    eyebrow: "Performance practice",
-                    title: "Train arithmetic, deliberately.",
-                    subtitle: "Every completed question stays on this Mac and becomes useful timing feedback.",
+                    title: "Practice",
                     systemImage: "bolt.fill"
                 )
 
@@ -224,6 +222,7 @@ private struct RangeEditor: View {
 struct ActivePracticeView: View {
     @Bindable var engine: SessionEngine
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.zetaReduceMotionOverride) private var reduceMotionOverride
 
     var body: some View {
         VStack(spacing: 0) {
@@ -258,11 +257,11 @@ struct ActivePracticeView: View {
                 .frame(width: 320, height: 58)
                 .accessibilityIdentifier("answerField")
 
-                Label("Correct answers submit automatically", systemImage: "checkmark.circle")
+                Label("Auto-submit enabled", systemImage: "checkmark.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: engine.currentQuestion?.prompt)
+            .animation(reduceMotion || reduceMotionOverride ? nil : .snappy(duration: 0.18), value: engine.currentQuestion?.prompt)
 
             Spacer()
             ZetaStatusChip(title: engine.configuration.mode.title, color: ZetaTheme.brand, systemImage: engine.configuration.mode.systemImage)
@@ -287,6 +286,7 @@ struct ActivePracticeView: View {
             Text(value)
                 .font(.title2.monospacedDigit().bold())
                 .foregroundStyle(label == "Time" && engine.remainingSeconds <= 10 ? ZetaTheme.caution : Color.primary)
+                .accessibilityIdentifier(label == "Score" ? "practiceScore" : "practiceTime")
         }
         .frame(width: 130, alignment: label == "Time" ? .leading : .trailing)
     }
@@ -316,7 +316,7 @@ struct SessionResultsView: View {
             .frame(maxWidth: 760)
             HStack {
                 Button("Back to setup") { engine.dismissResults() }
-                Button("Practise again") {
+                Button("Practice again") {
                     engine.dismissResults()
                     engine.start()
                 }

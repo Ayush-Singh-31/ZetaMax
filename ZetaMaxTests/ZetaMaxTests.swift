@@ -4,6 +4,29 @@ import XCTest
 @testable import ZetaMax
 
 final class QuestionGeneratorTests: XCTestCase {
+    func testAppearanceDefaultsToSystemAndPersists() throws {
+        let suiteName = "ZetaMaxTests.Appearance.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(AppAppearance.persisted(in: defaults), .system)
+        AppAppearance.dark.persist(in: defaults)
+        XCTAssertEqual(AppAppearance.persisted(in: defaults), .dark)
+        AppAppearance.light.persist(in: defaults)
+        XCTAssertEqual(AppAppearance.persisted(in: defaults), .light)
+    }
+
+    func testAnalyticsFilterKeysCaptureEveryFilter() {
+        let baseline = AnalyticsFilterKey.default30Days
+        XCTAssertEqual(baseline, AnalyticsFilterKey())
+        XCTAssertNotEqual(baseline, AnalyticsFilterKey(dateRange: .week))
+        XCTAssertNotEqual(baseline, AnalyticsFilterKey(mode: .adaptive))
+        XCTAssertNotEqual(baseline, AnalyticsFilterKey(operation: .division))
+        XCTAssertNotEqual(baseline, AnalyticsFilterKey(targetedPreset: .percentages))
+        XCTAssertNotEqual(baseline, AnalyticsFilterKey(benchmarkProfileKey: "standard-v1"))
+        XCTAssertEqual(Set([baseline, baseline]).count, 1)
+    }
+
     func testSeededGenerationIsDeterministic() {
         let first = QuestionGenerator(seed: 42)
         let second = QuestionGenerator(seed: 42)
@@ -103,7 +126,9 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(snapshot.medianMilliseconds, 2_000)
         XCTAssertEqual(snapshot.p90Milliseconds, 2_000)
         XCTAssertEqual(snapshot.consistency, 100)
-        XCTAssertEqual(snapshot.heatmap.first?.left, 7)
+        let operand = snapshot.operandExplorers.first { $0.operation == .multiplication }?.cells.first
+        XCTAssertEqual(operand?.primaryLabel, "7")
+        XCTAssertEqual(operand?.secondaryLabel, "8")
         XCTAssertEqual(snapshot.slowestCompletions.first?.responseMilliseconds, 2_000)
 
         let csv = ExportService.csv(sessions: fetched)
@@ -206,7 +231,7 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(Statistics.medianAbsoluteDeviation([1, 1, 1, 2]), 0)
     }
 
-    func testTimingAnalyticsBaselinesTailFatigueAndLegacyErrors() throws {
+    func testTimingAnalyticsBaselinesSessionPaceAndLegacyErrors() throws {
         let container = try DataStore.makeContainer(inMemory: true)
         let repository = SwiftDataRepository(context: container.mainContext)
         let start = Date(timeIntervalSince1970: 10_000)
@@ -246,11 +271,11 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(snapshot.distribution.last?.count, 1)
         XCTAssertEqual(snapshot.distribution.last?.isOverflow, true)
         XCTAssertNil(snapshot.categoryBaselines["multiplication/rare"], "Fewer than five timings must use the global fallback")
-        XCTAssertEqual(snapshot.heatmap.first { $0.left == 7 && $0.right == 8 }?.p90Milliseconds, 2_000)
+        XCTAssertEqual(snapshot.operandExplorers.first { $0.operation == .multiplication }?.cells.first { $0.primaryLabel == "7" && $0.secondaryLabel == "8" }?.p90Milliseconds, 2_000)
         XCTAssertEqual(snapshot.slowestCompletions.first?.prompt, "12 × 99")
         XCTAssertGreaterThan(snapshot.slowestCompletions.first?.baselineMultiple ?? 0, 5)
-        XCTAssertEqual(snapshot.fatigue.count, 5)
-        XCTAssertTrue(snapshot.fatigue.contains { $0.sampleCount > 0 })
+        XCTAssertEqual(snapshot.sessionPace.count, 5)
+        XCTAssertTrue(snapshot.sessionPace.contains { $0.sampleCount > 0 })
         XCTAssertEqual(session.incorrectSubmissionCount, 7, "Fixture proves legacy errors exist but timing analytics ignore them")
     }
 
@@ -322,7 +347,10 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         let recommendations = AnalyticsEngine.recommendations(sessions: [], estimates: [fast, slow, unsupported], now: now)
         XCTAssertEqual(recommendations.first?.categoryKey, slow.categoryKey)
         XCTAssertFalse(recommendations.contains { $0.categoryKey == unsupported.categoryKey })
-        XCTAssertFalse(recommendations.first?.explanation.localizedCaseInsensitiveContains("accuracy") == true)
+        XCTAssertEqual(recommendations.first?.categoryName, slow.categoryName)
+        XCTAssertEqual(recommendations.first?.medianMilliseconds, 3_000)
+        XCTAssertEqual(recommendations.first?.sampleCount, 20)
+        XCTAssertEqual(recommendations.first?.sessionDurationSeconds, 45)
         let weights = AdaptiveModel.categoryWeights(estimates: [fast, slow], focus: 0.5, now: now)
         XCTAssertGreaterThan(weights[slow.categoryKey] ?? 0, weights[fast.categoryKey] ?? 0)
     }
@@ -473,13 +501,13 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(snapshot.operations.map(\.operation), [.addition])
         XCTAssertTrue(snapshot.categories.allSatisfy { $0.operation == .addition })
         XCTAssertTrue(snapshot.slowestCompletions.allSatisfy { $0.categoryName == "Addition · core" })
-        XCTAssertTrue(snapshot.heatmap.isEmpty)
+        XCTAssertTrue(snapshot.operandExplorers.allSatisfy { $0.operation == .addition })
         XCTAssertEqual(snapshot.trends.first?.sampleCount, 4)
         XCTAssertEqual(snapshot.pace.sessions.first?.points.last?.completedCount, 4)
         XCTAssertTrue(snapshot.benchmarkResults.isEmpty)
     }
 
-    func testSparseHeatmapAndBenchmarkVersionsNeverImplyMissingData() throws {
+    func testSparseOperandResultsAndBenchmarkVersionsNeverImplyMissingData() throws {
         let container = try DataStore.makeContainer(inMemory: true)
         let repository = SwiftDataRepository(context: container.mainContext)
         let start = Date(timeIntervalSince1970: 200_000)
@@ -488,18 +516,106 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
             var configuration = BenchmarkProfile.builtIns.first { $0.durationSeconds == 120 }!.configuration
             configuration.benchmarkVersion = version
             let session = try repository.createSession(configuration: configuration, seed: UInt64(version), startedAt: start.addingTimeInterval(Double(version) * 86_400))
-            for position in 0..<(version == 1 ? 8 : 11) {
+            for position in 0..<(version == 1 ? 9 : 11) {
                 try addTimedAttempt(repository: repository, session: session, categoryKey: "multiplication/core", categoryName: "Multiplication · core", prompt: "7 × 8", milliseconds: 1_000 + position * 10, position: position, presentedAt: session.startedAt.addingTimeInterval(Double(position) * 4))
             }
             try repository.finish(session, status: .completed, reason: .timerExpired, at: session.startedAt.addingTimeInterval(120), elapsedMilliseconds: 120_000)
         }
 
         let snapshot = AnalyticsEngine.snapshot(sessions: try repository.fetchSessions())
-        XCTAssertEqual(snapshot.heatmapPresentation, .rankedPairs)
+        XCTAssertEqual(snapshot.operandExplorers.first { $0.operation == .multiplication }?.presentation, .rankedPairs)
         XCTAssertEqual(snapshot.benchmarkProfiles.count, 2)
         XCTAssertEqual(Set(snapshot.personalBests.keys).count, 2)
-        XCTAssertTrue(snapshot.benchmarkProfiles.contains { $0.version == 1 && $0.personalBest == 8 })
+        XCTAssertTrue(snapshot.benchmarkProfiles.contains { $0.version == 1 && $0.personalBest == 9 })
         XCTAssertTrue(snapshot.benchmarkProfiles.contains { $0.version == 2 && $0.personalBest == 11 })
+        XCTAssertEqual(snapshot.benchmarkResults.map(\.activeDurationSeconds), [120, 120])
+        XCTAssertEqual(snapshot.benchmarkResults.first?.questionsPerMinute ?? 0, 4.5, accuracy: 0.001)
+        let standardProjection = snapshot.benchmarkProjections.first { $0.durationSeconds == 120 }?.expected?.median
+        XCTAssertNotNil(standardProjection)
+        XCTAssertTrue(snapshot.benchmarkProfiles.allSatisfy { $0.projectedScore == standardProjection })
+    }
+
+    func testGeneralizedOperandExplorerUsesDenseGridsAndRankedUnaryFallbacks() throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let start = Date(timeIntervalSince1970: 240_000)
+        let session = try repository.createSession(configuration: .classicDefault, seed: 401, startedAt: start)
+        var position = 0
+
+        for left in 2...3 {
+            for right in 4...7 {
+                try addCustomTimedAttempt(
+                    repository: repository,
+                    session: session,
+                    operation: .addition,
+                    kind: .standard,
+                    categoryKey: "addition/grid",
+                    categoryName: "Addition · grid",
+                    left: Decimal(left),
+                    right: Decimal(right),
+                    answer: Decimal(left + right),
+                    prompt: "\(left) + \(right)",
+                    position: position,
+                    presentedAt: start.addingTimeInterval(Double(position)),
+                    milliseconds: 700 + position * 10
+                )
+                position += 1
+            }
+        }
+
+        for base in 2...5 {
+            try addCustomTimedAttempt(
+                repository: repository,
+                session: session,
+                operation: .power,
+                kind: .square,
+                categoryKey: "power/squares",
+                categoryName: "Powers · squares",
+                left: Decimal(base),
+                right: nil,
+                answer: Decimal(base * base),
+                prompt: "\(base)²",
+                position: position,
+                presentedAt: start.addingTimeInterval(Double(position)),
+                milliseconds: 900 + position * 10
+            )
+            position += 1
+        }
+
+        for value in 2...13 {
+            try addCustomTimedAttempt(
+                repository: repository,
+                session: session,
+                operation: .division,
+                kind: .standard,
+                categoryKey: "division/sparse",
+                categoryName: "Division · sparse",
+                left: Decimal(value * value),
+                right: Decimal(value),
+                answer: Decimal(value),
+                prompt: "\(value * value) ÷ \(value)",
+                position: position,
+                presentedAt: start.addingTimeInterval(Double(position)),
+                milliseconds: 1_000 + position * 10
+            )
+            position += 1
+        }
+
+        try repository.finish(session, status: .completed, reason: .timerExpired, at: start.addingTimeInterval(120), elapsedMilliseconds: 120_000)
+        let snapshot = AnalyticsEngine.snapshot(sessions: [session])
+        let addition = try XCTUnwrap(snapshot.operandExplorers.first { $0.operation == .addition })
+        XCTAssertEqual(addition.horizontalAxis, .firstAddend)
+        XCTAssertEqual(addition.verticalAxis, .secondAddend)
+        XCTAssertEqual(addition.cells.count, 8)
+        XCTAssertEqual(addition.presentation, .grid)
+
+        let powers = try XCTUnwrap(snapshot.operandExplorers.first { $0.operation == .power })
+        XCTAssertEqual(powers.horizontalAxis, .base)
+        XCTAssertNil(powers.verticalAxis)
+        XCTAssertEqual(powers.presentation, .rankedPairs)
+
+        let division = try XCTUnwrap(snapshot.operandExplorers.first { $0.operation == .division })
+        XCTAssertEqual(division.presentation, .rankedPairs, "A sparse 12×12 diagonal must not imply unobserved cells")
     }
 
     private func addTimedAttempt(
@@ -543,6 +659,48 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         )
     }
 
+    private func addCustomTimedAttempt(
+        repository: SwiftDataRepository,
+        session: PracticeSession,
+        operation: ArithmeticOperation,
+        kind: QuestionKind,
+        categoryKey: String,
+        categoryName: String,
+        left: Decimal,
+        right: Decimal?,
+        answer: Decimal,
+        prompt: String,
+        position: Int,
+        presentedAt: Date,
+        milliseconds: Int
+    ) throws {
+        let question = GeneratedQuestion(
+            operation: operation,
+            kind: kind,
+            category: QuestionCategory(key: categoryKey, displayName: categoryName, operation: operation),
+            leftOperand: left,
+            rightOperand: right,
+            prompt: prompt,
+            correctAnswer: answer
+        )
+        let attempt = QuestionAttempt(question: question, position: position, presentedAt: presentedAt)
+        attempt.wasEventuallyCorrect = true
+        attempt.answeredAt = presentedAt.addingTimeInterval(Double(milliseconds) / 1_000)
+        attempt.responseTimeMilliseconds = milliseconds
+        try repository.addAttempt(attempt, to: session)
+        try repository.addSubmission(
+            AnswerSubmission(
+                rawInput: DecimalText.canonical(answer),
+                normalizedAnswer: answer,
+                submittedAt: attempt.answeredAt!,
+                elapsedMilliseconds: milliseconds,
+                isCorrect: true
+            ),
+            to: attempt,
+            session: session
+        )
+    }
+
     private func testQuestion(prompt: String, answer: Decimal) -> GeneratedQuestion {
         GeneratedQuestion(
             operation: .multiplication,
@@ -563,6 +721,30 @@ final class ManualClock: MonotonicClock, @unchecked Sendable {
 
 @MainActor
 final class SessionEngineTests: XCTestCase {
+    func testCorrectOneDigitAnswerClearsFieldAndAdvancesOnce() throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let engine = SessionEngine(repository: repository, clock: ManualClock())
+        var configuration = PracticeConfiguration.classicDefault
+        configuration.operations = [.addition]
+        configuration.additionLeft = OperandRange(2, 3)
+        configuration.additionRight = OperandRange(2, 3)
+        engine.configuration = configuration
+        engine.start(seed: 70)
+        let originalAttemptID = try XCTUnwrap(try repository.fetchSessions().first?.sortedAttempts.first?.id)
+        let answer = try XCTUnwrap(engine.currentQuestion?.answerCanonical)
+        XCTAssertEqual(answer.count, 1)
+
+        engine.answerText = answer
+        engine.answerDidChange(answer)
+
+        let session = try XCTUnwrap(try repository.fetchSessions().first)
+        XCTAssertEqual(engine.answerText, "")
+        XCTAssertEqual(engine.score, 1)
+        XCTAssertEqual(session.sortedAttempts.count, 2)
+        XCTAssertEqual(session.sortedAttempts.first { $0.id == originalAttemptID }?.submissions.count, 1)
+    }
+
     func testCorrectAnswerAutomaticallySubmitsAndAdvancesExactlyOnce() throws {
         let container = try DataStore.makeContainer(inMemory: true)
         let repository = SwiftDataRepository(context: container.mainContext)
@@ -670,5 +852,180 @@ final class SessionEngineTests: XCTestCase {
         engine.interruptForSleep()
         XCTAssertEqual(engine.completedSession?.status, .interrupted)
         XCTAssertEqual(engine.completedSession?.endReason, .systemSleep)
+    }
+}
+
+@MainActor
+final class AnalyticsServiceTests: XCTestCase {
+    func testConcurrentRequestsReuseOneSnapshotCalculation() async throws {
+        let service = AnalyticsService(testingSessions: [])
+        async let first = service.snapshot(for: .default30Days, revision: 0)
+        async let second = service.snapshot(for: .default30Days, revision: 0)
+        let results = try await [first, second]
+        XCTAssertEqual(results.filter(\.wasCacheHit).count, 1)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.coldCalculations, 1)
+        XCTAssertEqual(metrics.cacheHits, 1)
+    }
+
+    func testBackgroundContextConvertsSwiftDataToImmutableInputs() async throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let startedAt = Date.now
+        let session = try repository.createSession(configuration: .classicDefault, seed: 450, startedAt: startedAt)
+        let question = GeneratedQuestion(
+            operation: .addition,
+            kind: .standard,
+            category: QuestionCategory(key: "addition/background", displayName: "Addition · background", operation: .addition),
+            leftOperand: 2,
+            rightOperand: 3,
+            prompt: "2 + 3",
+            correctAnswer: 5
+        )
+        let attempt = QuestionAttempt(question: question, position: 0, presentedAt: startedAt)
+        attempt.wasEventuallyCorrect = true
+        attempt.responseTimeMilliseconds = 800
+        attempt.answeredAt = startedAt.addingTimeInterval(0.8)
+        try repository.addAttempt(attempt, to: session)
+        try repository.addSubmission(
+            AnswerSubmission(rawInput: "5", normalizedAnswer: 5, submittedAt: attempt.answeredAt!, elapsedMilliseconds: 800, isCorrect: true),
+            to: attempt,
+            session: session
+        )
+        try repository.finish(session, status: .completed, reason: .timerExpired, at: startedAt.addingTimeInterval(60), elapsedMilliseconds: 60_000)
+
+        let service = AnalyticsService(container: container)
+        let result = try await service.snapshot(for: .default30Days, revision: repository.revision.value)
+        XCTAssertEqual(result.value.sessionCount, 1)
+        XCTAssertEqual(result.value.completedCount, 1)
+        XCTAssertEqual(result.value.medianMilliseconds, 800)
+        XCTAssertEqual(result.value.operandExplorers.first?.operation, .addition)
+    }
+
+    func testCacheHitsFilterKeysRevisionInvalidationAndDerivedCaches() async throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let service = AnalyticsService(container: container)
+
+        let first = try await service.snapshot(for: .default30Days, revision: 0)
+        let second = try await service.snapshot(for: .default30Days, revision: 0)
+        XCTAssertFalse(first.wasCacheHit)
+        XCTAssertTrue(second.wasCacheHit)
+
+        let week = try await service.snapshot(for: AnalyticsFilterKey(dateRange: .week), revision: 0)
+        XCTAssertFalse(week.wasCacheHit)
+
+        let firstRecommendations = try await service.recommendations(revision: 0)
+        let secondRecommendations = try await service.recommendations(revision: 0)
+        XCTAssertFalse(firstRecommendations.wasCacheHit)
+        XCTAssertTrue(secondRecommendations.wasCacheHit)
+
+        let firstHistory = try await service.historyBaseline(revision: 0)
+        let secondHistory = try await service.historyBaseline(revision: 0)
+        XCTAssertFalse(firstHistory.wasCacheHit)
+        XCTAssertTrue(secondHistory.wasCacheHit)
+
+        await service.invalidate(for: 1)
+        let afterRevision = try await service.snapshot(for: .default30Days, revision: 1)
+        XCTAssertFalse(afterRevision.wasCacheHit)
+
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.coldCalculations, 3)
+        XCTAssertGreaterThanOrEqual(metrics.cacheHits, 3)
+        XCTAssertEqual(metrics.datasetFetches, 2)
+        XCTAssertEqual(metrics.recommendationCalculations, 1)
+        XCTAssertEqual(metrics.historyBaselineCalculations, 1)
+    }
+
+    func testCancelledSnapshotDoesNotPopulateCache() async throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let service = AnalyticsService(container: container)
+        let filter = AnalyticsFilterKey(dateRange: .quarter, operation: .multiplication)
+        let task = Task { try await service.snapshot(for: filter, revision: 0) }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled snapshot request should throw CancellationError")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let retry = try await service.snapshot(for: filter, revision: 0)
+        XCTAssertFalse(retry.wasCacheHit)
+        let metrics = await service.metrics()
+        XCTAssertGreaterThanOrEqual(metrics.cancelledCalculations, 1)
+    }
+
+    func testTenThousandAttemptFixtureHasImmediateCachedPresentation() async throws {
+        var configuration = PracticeConfiguration.classicDefault
+        configuration.durationSeconds = 600
+        let sessionID = UUID()
+        let startedAt = Date.now
+        let attempts = (0..<10_000).map { index in
+            let left = 2 + index % 20
+            let right = 2 + (index / 20) % 20
+            let presentedAt = startedAt.addingTimeInterval(Double(index) * 0.05)
+            let milliseconds = 650 + index % 900
+            return AnalyticsAttemptInput(
+                operation: .multiplication,
+                kind: .standard,
+                categoryKey: "multiplication/performance-fixture",
+                categoryName: "Multiplication · performance fixture",
+                leftOperandText: String(left),
+                rightOperandText: String(right),
+                prompt: "\(left) × \(right)",
+                presentedAt: presentedAt,
+                answeredAt: presentedAt.addingTimeInterval(Double(milliseconds) / 1_000),
+                responseTimeMilliseconds: milliseconds,
+                wasEventuallyCorrect: true,
+                position: index,
+                sessionID: sessionID,
+                sessionStartedAt: startedAt,
+                sessionMode: .classic
+            )
+        }
+        let session = AnalyticsSessionInput(
+            id: sessionID,
+            startedAt: startedAt,
+            durationSeconds: 600,
+            isComparable: true,
+            mode: .classic,
+            configuration: configuration,
+            correctCount: 10_000,
+            activeElapsedMilliseconds: 600_000,
+            attempts: attempts
+        )
+
+        let service = AnalyticsService(testingSessions: [session])
+        let cold = Task { try await service.snapshot(for: .default30Days, revision: 0) }
+        let mainThreadPingStart = Date()
+        await Task.yield()
+        XCTAssertLessThan(Date().timeIntervalSince(mainThreadPingStart), 0.1)
+        let coldResult = try await cold.value
+        XCTAssertEqual(coldResult.value.completedCount, 10_000)
+
+        let cachedStart = Date()
+        let cached = try await service.snapshot(for: .default30Days, revision: 0)
+        let cachedElapsed = Date().timeIntervalSince(cachedStart)
+        XCTAssertTrue(cached.wasCacheHit)
+        XCTAssertLessThan(cachedElapsed, 0.2)
+        XCTAssertEqual(cached.value.completedCount, 10_000)
+    }
+
+    func testRepositoryPublishesRevisionForCompletedAndRebuiltData() throws {
+        let container = try DataStore.makeContainer(inMemory: true)
+        let repository = SwiftDataRepository(context: container.mainContext)
+        let initialRevision = repository.revision.value
+        let session = try repository.createSession(configuration: .classicDefault, seed: 500, startedAt: .now)
+        XCTAssertEqual(repository.revision.value, initialRevision)
+
+        try repository.finish(session, status: .completed, reason: .timerExpired, at: .now, elapsedMilliseconds: 1_000)
+        XCTAssertEqual(repository.revision.value, initialRevision + 1)
+        try repository.replaceSkillEstimates(with: [])
+        XCTAssertEqual(repository.revision.value, initialRevision + 2)
+        try repository.delete(session)
+        XCTAssertEqual(repository.revision.value, initialRevision + 3)
+        try repository.resetAllData()
+        XCTAssertEqual(repository.revision.value, initialRevision + 4)
     }
 }

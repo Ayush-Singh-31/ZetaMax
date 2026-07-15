@@ -17,6 +17,8 @@ enum HistoryLayoutPolicy {
 
 struct HistoryView: View {
     let repository: SwiftDataRepository
+    @Bindable var analyticsStore: AnalyticsStore
+    let revision: RepositoryRevision
     @Query(sort: \PracticeSession.startedAt, order: .reverse) private var sessions: [PracticeSession]
     @State private var selectedID: UUID?
     @State private var searchText = ""
@@ -60,13 +62,17 @@ struct HistoryView: View {
                     sessionList(layout: layout)
                 }
             }
+            .clipShape(RoundedRectangle(cornerRadius: ZetaTheme.cornerRadius, style: .continuous))
+            .zetaLayeredSurface(cornerRadius: ZetaTheme.cornerRadius)
+            .padding(12)
             .background(ZetaBackground())
-            .animation(.easeInOut(duration: 0.18), value: layout)
             .task(id: layout) {
                 if layout == .wide { selectNewestIfNeeded() }
             }
         }
         .navigationTitle("History")
+        .onAppear { analyticsStore.requestHistoryBaseline() }
+        .onChange(of: revision.value) { _, _ in analyticsStore.requestHistoryBaseline() }
         .toolbar {
             Menu("Export all", systemImage: "square.and.arrow.up") {
                 Button("CSV") { export(sessions, as: .csv) }
@@ -104,7 +110,7 @@ struct HistoryView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 if layout == .compact {
-                    ZetaPageHeader(eyebrow: "Timeline", title: "History", subtitle: "Search and inspect every completed timing.", systemImage: "clock.arrow.circlepath")
+                    ZetaPageHeader(title: "History", systemImage: "clock.arrow.circlepath")
                 } else {
                     Text("Sessions").font(.title2.bold())
                     Text("\(filteredSessions.count) of \(sessions.count)")
@@ -132,6 +138,8 @@ struct HistoryView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             .overlay {
                 if sessions.isEmpty {
                     ContentUnavailableView("No sessions", systemImage: "clock", description: Text("Completed sessions appear here."))
@@ -148,7 +156,7 @@ struct HistoryView: View {
         if let selected {
             SessionDetailView(
                 session: selected,
-                baselineSessions: sessions,
+                baseline: analyticsStore.historyBaseline,
                 isCompact: layout == .compact,
                 onBack: layout == .compact ? { selectedID = nil } : nil,
                 onExport: { export([selected], as: $0) },
@@ -228,7 +236,7 @@ private struct SessionHistoryRow: View {
 
 private struct SessionDetailView: View {
     let session: PracticeSession
-    let baselineSessions: [PracticeSession]
+    let baseline: TimingBaselineResult
     let isCompact: Bool
     let onBack: (() -> Void)?
     let onExport: (ExportFormat) -> Void
@@ -277,7 +285,7 @@ private struct SessionDetailView: View {
             }
             .padding(isCompact ? 16 : 22)
         }
-        .background(ZetaBackground())
+        .background(Color.clear)
         .accessibilityIdentifier("historySessionDetail")
     }
 
@@ -365,8 +373,7 @@ private struct SessionDetailView: View {
         let elapsed = Double(session.activeElapsedMilliseconds ?? session.durationSeconds * 1_000) / 1_000
         return elapsed > 0 ? Double(completedTimings.count) / (elapsed / 60) : 0
     }
-    private var baselineSnapshot: DashboardSnapshot { AnalyticsEngine.snapshot(sessions: baselineSessions, baselineSessions: baselineSessions) }
-    private func categoryBaseline(_ attempt: QuestionAttempt) -> Double { baselineSnapshot.categoryBaselines[attempt.categoryKey] ?? max(baselineSnapshot.globalBaselineMilliseconds, 1) }
+    private func categoryBaseline(_ attempt: QuestionAttempt) -> Double { baseline.value(for: attempt.categoryKey) }
     private func responseTime(_ attempt: QuestionAttempt) -> String { attempt.responseTimeMilliseconds.map { String(format: "%.2fs", Double($0) / 1_000) } ?? "—" }
     private func relativeTime(_ attempt: QuestionAttempt) -> String {
         guard let milliseconds = attempt.responseTimeMilliseconds else { return "—" }
@@ -380,7 +387,7 @@ private struct SessionDetailView: View {
         return .secondary
     }
     private func difficultyText(_ attempt: QuestionAttempt) -> String {
-        let global = max(baselineSnapshot.globalBaselineMilliseconds, 1)
+        let global = max(baseline.globalMilliseconds, 1)
         return "Difficulty \(Int((categoryBaseline(attempt) / global * 100).rounded()))"
     }
 }

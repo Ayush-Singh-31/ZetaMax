@@ -1,6 +1,5 @@
 import AppKit
 import Observation
-import SwiftData
 import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
@@ -9,7 +8,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .practice: "Practice"
-        case .recommendations: "What should I practise?"
+        case .recommendations: "Recommendations"
         case .analytics: "Analytics"
         case .history: "History"
         case .settings: "Settings"
@@ -36,6 +35,9 @@ struct AppRootView: View {
     @Bindable var engine: SessionEngine
     @Bindable var navigation: NavigationModel
     let repository: SwiftDataRepository
+    @Bindable var analyticsStore: AnalyticsStore
+    @Binding var appearance: AppAppearance
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
@@ -46,12 +48,63 @@ struct AppRootView: View {
                 SessionResultsView(engine: engine)
             case .idle:
                 NavigationSplitView {
-                    List(AppSection.allCases, selection: $navigation.selection) { section in
-                        Label(section.title, systemImage: section.icon)
-                            .tag(section)
-                            .accessibilityIdentifier("navigation-\(section.rawValue)")
+                    VStack(spacing: 12) {
+                        VStack(spacing: 5) {
+                            ForEach(AppSection.allCases) { section in
+                                Button {
+                                    withAnimation(motionDisabled ? nil : .easeOut(duration: 0.15)) {
+                                        navigation.selection = section
+                                    }
+                                } label: {
+                                    HStack(spacing: 11) {
+                                        Image(systemName: section.icon)
+                                            .frame(width: 20)
+                                        Text(section.title)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .font(.callout.weight(navigation.selection == section ? .semibold : .regular))
+                                    .foregroundStyle(navigation.selection == section ? Color.primary : Color.secondary)
+                                    .padding(.horizontal, 12)
+                                    .frame(height: 38)
+                                    .background(
+                                        navigation.selection == section ? AnyShapeStyle(ZetaTheme.selectionGradient) : AnyShapeStyle(Color.clear),
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    )
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .strokeBorder(navigation.selection == section ? ZetaTheme.brand.opacity(0.22) : .clear)
+                                    }
+                                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("navigation-\(section.rawValue)")
+                            }
+                        }
+                        .padding(8)
+                        .zetaLayeredSurface(cornerRadius: 14)
+
+                        Spacer(minLength: 0)
+
+                        Menu {
+                            Picker("Appearance", selection: $appearance) {
+                                ForEach(AppAppearance.allCases) { option in
+                                    Label(option.title, systemImage: option.systemImage).tag(option)
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Label(appearance.title, systemImage: appearance.systemImage)
+                                Spacer()
+                                Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: 38)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .accessibilityIdentifier("sidebarAppearanceMenu")
                     }
-                    .listStyle(.sidebar)
+                    .padding(10)
+                    .background(ZetaBackground())
                     .navigationSplitViewColumnWidth(min: 205, ideal: 225, max: 250)
                 } detail: {
                     destination
@@ -60,10 +113,15 @@ struct AppRootView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 620)
+        .modifier(UITestReduceMotionModifier(enabled: ProcessInfo.processInfo.arguments.contains("-ui-testing-reduce-motion")))
         .tint(ZetaTheme.brand)
-        .preferredColorScheme(uiTestColorScheme)
+        .preferredColorScheme(uiTestColorScheme ?? appearance.colorScheme)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: configureUITestWindowIfNeeded)
+        .onAppear { analyticsStore.prewarmDefaultSnapshot() }
+        .onChange(of: repository.revision.value) { _, _ in
+            analyticsStore.repositoryDidChange()
+        }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
             engine.interruptForSleep()
         }
@@ -80,13 +138,13 @@ struct AppRootView: View {
         case .practice:
             PracticeSetupView(engine: engine)
         case .recommendations:
-            RecommendationsView(engine: engine)
+            RecommendationsView(engine: engine, analyticsStore: analyticsStore, revision: repository.revision)
         case .analytics:
-            AnalyticsDashboardView()
+            AnalyticsDashboardView(analyticsStore: analyticsStore, revision: repository.revision)
         case .history:
-            HistoryView(repository: repository)
+            HistoryView(repository: repository, analyticsStore: analyticsStore, revision: repository.revision)
         case .settings:
-            SettingsView(repository: repository)
+            SettingsView(repository: repository, appearance: $appearance)
         }
     }
 
@@ -104,6 +162,10 @@ struct AppRootView: View {
         return nil
     }
 
+    private var motionDisabled: Bool {
+        reduceMotion || ProcessInfo.processInfo.arguments.contains("-ui-testing-reduce-motion")
+    }
+
     private func configureUITestWindowIfNeeded() {
         let arguments = ProcessInfo.processInfo.arguments
         let size: NSSize?
@@ -119,6 +181,19 @@ struct AppRootView: View {
                     ?? NSApplication.shared.windows.first
                 window?.setContentSize(size)
             }
+        }
+    }
+}
+
+private struct UITestReduceMotionModifier: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.environment(\.zetaReduceMotionOverride, true)
+        } else {
+            content
         }
     }
 }

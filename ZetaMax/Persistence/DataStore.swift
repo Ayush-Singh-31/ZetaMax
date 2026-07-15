@@ -39,9 +39,11 @@ enum DataStore {
 @MainActor
 final class SwiftDataRepository: AttemptRepository {
     let context: ModelContext
+    let revision: RepositoryRevision
 
-    init(context: ModelContext) {
+    init(context: ModelContext, revision: RepositoryRevision? = nil) {
         self.context = context
+        self.revision = revision ?? RepositoryRevision()
         context.autosaveEnabled = true
     }
 
@@ -84,6 +86,7 @@ final class SwiftDataRepository: AttemptRepository {
         session.endedAt = date
         session.activeElapsedMilliseconds = elapsedMilliseconds
         try context.save()
+        revision.advance()
     }
 
     func fetchSessions() throws -> [PracticeSession] {
@@ -100,6 +103,7 @@ final class SwiftDataRepository: AttemptRepository {
         for old in try fetchSkillEstimates() { context.delete(old) }
         estimates.forEach(context.insert)
         try context.save()
+        revision.advance()
     }
 
     func rebuildSkillEstimatesIfNeeded() throws {
@@ -113,12 +117,14 @@ final class SwiftDataRepository: AttemptRepository {
     func recoverInterruptedSessions(at date: Date = .now) throws {
         let inProgress = SessionStatus.inProgress.rawValue
         let descriptor = FetchDescriptor<PracticeSession>(predicate: #Predicate { $0.statusRaw == inProgress })
-        for session in try context.fetch(descriptor) {
+        let sessions = try context.fetch(descriptor)
+        for session in sessions {
             session.status = .interrupted
             session.endReason = .recoveredAfterLaunch
             session.endedAt = date
         }
         try context.save()
+        if !sessions.isEmpty { revision.advance() }
     }
 
     func delete(_ session: PracticeSession) throws {
@@ -129,6 +135,7 @@ final class SwiftDataRepository: AttemptRepository {
             for estimate in try fetchSkillEstimates() { context.delete(estimate) }
             rebuiltEstimates.forEach(context.insert)
             try context.save()
+            revision.advance()
         } catch {
             context.rollback()
             throw error
@@ -143,6 +150,7 @@ final class SwiftDataRepository: AttemptRepository {
             for session in try fetchSessions() { context.delete(session) }
             for estimate in try fetchSkillEstimates() { context.delete(estimate) }
             try context.save()
+            revision.advance()
         } catch {
             context.rollback()
             throw error

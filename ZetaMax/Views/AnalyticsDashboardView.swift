@@ -1,4 +1,3 @@
-import SwiftData
 import SwiftUI
 
 enum AnalyticsSection: String, CaseIterable, Identifiable {
@@ -13,22 +12,6 @@ enum AnalyticsSection: String, CaseIterable, Identifiable {
         case .skills: "square.grid.2x2"
         case .distribution: "chart.bar.xaxis"
         case .benchmarks: "stopwatch"
-        }
-    }
-}
-
-enum AnalyticsDateRange: String, CaseIterable, Identifiable {
-    case week = "7 days"
-    case month = "30 days"
-    case quarter = "90 days"
-    case all = "All time"
-    var id: String { rawValue }
-    var days: Int? {
-        switch self {
-        case .week: 7
-        case .month: 30
-        case .quarter: 90
-        case .all: nil
         }
     }
 }
@@ -49,7 +32,8 @@ enum AnalyticsFormatting {
 }
 
 struct AnalyticsDashboardView: View {
-    @Query(sort: \PracticeSession.startedAt, order: .reverse) private var allSessions: [PracticeSession]
+    @Bindable var analyticsStore: AnalyticsStore
+    let revision: RepositoryRevision
     @State private var section: AnalyticsSection = .overview
     @State private var dateRange: AnalyticsDateRange = .month
     @State private var mode: PracticeMode?
@@ -58,21 +42,12 @@ struct AnalyticsDashboardView: View {
     @State private var benchmarkProfileKey: String?
 
     var body: some View {
-        let filtered = filteredSessions(in: currentInterval)
-        let previous = previousInterval.map { filteredSessions(in: $0) }
-        let snapshot = AnalyticsEngine.snapshot(
-            sessions: filtered,
-            baselineSessions: allSessions,
-            previousSessions: previous,
-            operation: operation
-        )
+        let snapshot = analyticsStore.snapshot
 
         ZetaScreen {
             VStack(alignment: .leading, spacing: ZetaTheme.sectionSpacing) {
                 ZetaPageHeader(
-                    eyebrow: "Performance lab",
                     title: "Analytics",
-                    subtitle: "Explore pace, skill difficulty, timing distribution, and benchmark readiness from one consistent dataset.",
                     systemImage: "chart.xyaxis.line"
                 )
 
@@ -97,20 +72,45 @@ struct AnalyticsDashboardView: View {
                 .accessibilityIdentifier("analyticsSectionPicker")
 
                 if snapshot.sessionCount == 0 || snapshot.completedCount == 0 {
-                    ContentUnavailableView(
-                        "No matching timings",
-                        systemImage: "chart.xyaxis.line",
-                        description: Text("Complete a session or broaden the filters.")
-                    )
-                    .frame(minHeight: 340)
+                    if analyticsStore.isRefreshingSnapshot {
+                        ProgressView("Loading analytics…")
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity, minHeight: 340)
+                    } else {
+                        ContentUnavailableView(
+                            "No matching timings",
+                            systemImage: "chart.xyaxis.line",
+                            description: Text("Complete a session or broaden the filters.")
+                        )
+                        .frame(minHeight: 340)
+                    }
                 } else {
                     AnalyticsInsightBanner(text: snapshot.insight)
                     sectionView(snapshot: snapshot)
                 }
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if analyticsStore.isRefreshingSnapshot && snapshot.completedCount > 0 {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding()
+                    .accessibilityLabel("Refreshing analytics")
+            }
+        }
         .navigationTitle("Analytics")
-        .onAppear(perform: applyUITestSectionIfNeeded)
+        .onAppear {
+            applyUITestSectionIfNeeded()
+            analyticsStore.requestSnapshot(for: filterKey, debounce: false)
+        }
+        .onChange(of: filterKey) { _, key in
+            analyticsStore.requestSnapshot(for: key)
+        }
+        .onChange(of: revision.value) { _, _ in
+            analyticsStore.requestSnapshot(for: filterKey, debounce: false)
+        }
     }
 
     @ViewBuilder
@@ -131,42 +131,18 @@ struct AnalyticsDashboardView: View {
         }
     }
 
-    private var currentInterval: DateInterval? {
-        guard let days = dateRange.days,
-              let start = Calendar.current.date(byAdding: .day, value: -days, to: .now) else { return nil }
-        return DateInterval(start: start, end: .now)
-    }
-
-    private var previousInterval: DateInterval? {
-        guard let currentInterval, let days = dateRange.days,
-              let start = Calendar.current.date(byAdding: .day, value: -days, to: currentInterval.start) else { return nil }
-        return DateInterval(start: start, end: currentInterval.start)
-    }
-
-    private func filteredSessions(in interval: DateInterval?) -> [PracticeSession] {
-        allSessions.filter { session in
-            let dateMatches = interval.map { $0.contains(session.startedAt) } ?? true
-            let modeMatches = mode == nil || session.mode == mode
-            let targetMatches = targetedPreset == nil || session.configuration.targetedPreset == targetedPreset
-            let benchmarkMatches = benchmarkProfileKey == nil || profileKey(session) == benchmarkProfileKey
-            return dateMatches && modeMatches && targetMatches && benchmarkMatches
-        }
-    }
-
     private var benchmarkProfiles: [(key: String, title: String)] {
-        let values = allSessions.compactMap { session -> (String, String)? in
-            guard session.benchmarkID != nil else { return nil }
-            let key = profileKey(session)
-            let title = "\(session.benchmarkID ?? "Benchmark") · v\(session.benchmarkVersion ?? 0)"
-            return (key, title)
-        }
-        return Dictionary(values, uniquingKeysWith: { first, _ in first })
-            .map { ($0.key, $0.value) }
-            .sorted { $0.title < $1.title }
+        analyticsStore.snapshot.benchmarkFilterOptions.map { ($0.key, $0.title) }
     }
 
-    private func profileKey(_ session: PracticeSession) -> String {
-        "\(session.benchmarkID ?? "")-v\(session.benchmarkVersion ?? 0)"
+    private var filterKey: AnalyticsFilterKey {
+        AnalyticsFilterKey(
+            dateRange: dateRange,
+            mode: mode,
+            operation: operation,
+            targetedPreset: targetedPreset,
+            benchmarkProfileKey: benchmarkProfileKey
+        )
     }
 
     private func resetFilters() {

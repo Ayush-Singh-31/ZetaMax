@@ -102,6 +102,22 @@ final class ZetaMaxUITests: XCTestCase {
         }
     }
 
+    func testAnalyticsOverviewExposesDistinctSupportingCharts() throws {
+        let app = launch(extraArguments: ["-ui-testing-analytics", "-ui-testing-wide", "-ui-testing-dark"])
+        defer { app.terminate() }
+        app.typeKey("3", modifierFlags: [.command])
+
+        for title in ["Operation response times", "Response-time mix", "Session pace checkpoints"] {
+            XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 5), "Missing \(title)")
+        }
+
+        let scrollView = app.scrollViews.firstMatch
+        XCTAssertTrue(scrollView.exists)
+        scrollView.swipeUp()
+        scrollView.swipeUp()
+        attachScreenshot(app, name: "Analytics · Overview · Supporting charts")
+    }
+
     func testEveryAnalyticsSectionAtCompactMediumAndWideSizesInBothThemes() throws {
         let appearances = ["-ui-testing-light", "-ui-testing-dark"]
         let sizes = ["-ui-testing-compact", "-ui-testing-medium", "-ui-testing-wide"]

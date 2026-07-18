@@ -1,0 +1,101 @@
+name: Bug report
+description: Report reproducible behavior that is not working as intended.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve ZetaMax. Search existing issues first and remove personal practice data from screenshots, logs, and exports.
+
+  - type: input
+    id: version
+    attributes:
+      label: ZetaMax version
+      description: Include the marketing version and build when available.
+      placeholder: "1.0 (1) or source commit"
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: Mac and macOS
+      description: Include macOS version and processor or Mac model.
+      placeholder: "macOS 14.6, Apple M2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: distribution
+    attributes:
+      label: Installation source
+      options:
+        - Built from source
+        - Mac App Store
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Practice
+        - Recommendations
+        - Analytics
+        - History
+        - Export
+        - Settings or appearance
+        - Launch, persistence, or recovery
+        - Accessibility
+        - Build or tests
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence.
+      placeholder: |
+        1. Open …
+        2. Select …
+        3. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional context
+      description: Add a redacted screenshot, recording, crash excerpt, or other useful context.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing issue.
+          required: true
+        - label: I removed personal paths and practice data from anything attached.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

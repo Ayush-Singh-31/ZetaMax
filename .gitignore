@@ -1,9 +1,16 @@
 .DS_Store
+.build/
 DerivedData/
 build/
 dist/
+*.xcresult
 *.xcuserstate
 xcuserdata/
 *.xccheckout
 *.xcscmblueprint
-Artifacts/
+Artifacts/*
+!Artifacts/FinalTestScreenshots/
+Artifacts/FinalTestScreenshots/*
+!Artifacts/FinalTestScreenshots/A81DAE33-A145-4302-9755-0969E9D2094F.png
+!Artifacts/FinalTestScreenshots/AB54EBB7-3A14-49B4-ABBD-47192F4DCD46.png
+!Artifacts/FinalTestScreenshots/D0C6A57D-6FC8-47D4-9AF6-A28813E108B2.png

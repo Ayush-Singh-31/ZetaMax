@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support and troubleshooting
+    url: https://github.com/Ayush-Singh-31/ZetaMax/blob/main/SUPPORT.md
+    about: Review common questions and the details needed for a useful report.
+  - name: Private security report
+    url: https://github.com/Ayush-Singh-31/ZetaMax/security/advisories/new
+    about: Report suspected vulnerabilities without disclosing them publicly.

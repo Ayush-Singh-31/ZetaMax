@@ -1,0 +1,79 @@
+name: Feature request
+description: Propose a focused improvement to practice or the open-source project.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ZetaMax aims to stay focused, private, native, and statistically honest. Please describe the underlying need before a preferred implementation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What is difficult, missing, or unnecessarily slow today?
+      placeholder: "When I …, I need … because …"
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe what a successful experience would let someone accomplish.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Share a design or implementation idea if you have one.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Could existing modes, settings, exports, or workflows already address part of the need?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Practice
+        - Recommendations
+        - Analytics
+        - History
+        - Export
+        - Settings or appearance
+        - Accessibility
+        - Developer experience or documentation
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: implications
+    attributes:
+      label: Potential implications
+      description: Select every area the proposal may affect.
+      options:
+        - label: Stored data or migration
+        - label: Analytics definitions or comparability
+        - label: Adaptive sampling
+        - label: Privacy or networking
+        - label: Accessibility
+        - label: App Store metadata or review
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing request.
+          required: true
+        - label: This request preserves or explicitly discusses ZetaMax’s offline-first privacy model.
+          required: true

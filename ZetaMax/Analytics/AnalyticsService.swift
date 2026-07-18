@@ -90,6 +90,11 @@ struct AnalyticsServiceResult<Value: Sendable>: Sendable {
     let calculationMilliseconds: Double
 }
 
+struct AnalyticsStaleRevisionError: Error, Equatable, Sendable {
+    let requestedRevision: Int
+    let currentRevision: Int?
+}
+
 private struct AnalyticsDataset: Sendable {
     let sessions: [AnalyticsSessionInput]
     let estimates: [AnalyticsSkillEstimateInput]
@@ -100,13 +105,22 @@ private struct AnalyticsSnapshotCacheKey: Hashable, Sendable {
     let filter: AnalyticsFilterKey
 }
 
+private struct InFlightSnapshot: Sendable {
+    let task: Task<DashboardSnapshot?, Never>
+    var waiterIDs: Set<UUID>
+}
+
 actor AnalyticsService {
+    private static let snapshotCacheLimit = 16
+
     private let container: ModelContainer?
     private let testingDataset: AnalyticsDataset?
+    private let testingCalculationDelay: Duration?
     private var datasetRevision: Int?
     private var dataset: AnalyticsDataset?
     private var snapshots: [AnalyticsSnapshotCacheKey: DashboardSnapshot] = [:]
-    private var inFlightSnapshots: [AnalyticsSnapshotCacheKey: Task<DashboardSnapshot?, Never>] = [:]
+    private var snapshotRecency: [AnalyticsSnapshotCacheKey] = []
+    private var inFlightSnapshots: [AnalyticsSnapshotCacheKey: InFlightSnapshot] = [:]
     private var recommendationsByRevision: [Int: [Recommendation]] = [:]
     private var historyBaselinesByRevision: [Int: TimingBaselineResult] = [:]
     private var serviceMetrics = AnalyticsServiceMetrics()
@@ -115,11 +129,17 @@ actor AnalyticsService {
     init(container: ModelContainer) {
         self.container = container
         testingDataset = nil
+        testingCalculationDelay = nil
     }
 
-    init(testingSessions: [AnalyticsSessionInput], estimates: [AnalyticsSkillEstimateInput] = []) {
+    init(
+        testingSessions: [AnalyticsSessionInput],
+        estimates: [AnalyticsSkillEstimateInput] = [],
+        calculationDelay: Duration? = nil
+    ) {
         container = nil
         testingDataset = AnalyticsDataset(sessions: testingSessions, estimates: estimates)
+        testingCalculationDelay = calculationDelay
     }
 
     func snapshot(
@@ -128,23 +148,31 @@ actor AnalyticsService {
         now: Date = .now
     ) async throws -> AnalyticsServiceResult<DashboardSnapshot> {
         let key = AnalyticsSnapshotCacheKey(revision: revision, filter: filter)
-        if let cached = snapshots[key] {
+        if let cached = cachedSnapshot(for: key) {
             serviceMetrics.cacheHits += 1
             logger.debug("Analytics cache hit revision=\(revision) range=\(filter.dateRange.rawValue, privacy: .public)")
             return AnalyticsServiceResult(value: cached, wasCacheHit: true, calculationMilliseconds: 0)
         }
 
+        let waiterID = UUID()
         let calculation: Task<DashboardSnapshot?, Never>
-        if let inFlight = inFlightSnapshots[key] {
-            calculation = inFlight
+        if var inFlight = inFlightSnapshots[key] {
+            inFlight.waiterIDs.insert(waiterID)
+            inFlightSnapshots[key] = inFlight
+            calculation = inFlight.task
         } else {
             let source = try loadDataset(revision: revision)
             let intervals = intervals(for: filter.dateRange, now: now)
             let current = filtered(source.sessions, filter: filter, interval: intervals.current)
             let previous = intervals.previous.map { filtered(source.sessions, filter: filter, interval: $0) }
-            let baseline = source.sessions
+            let filteredBaseline = filtered(source.sessions, filter: filter, interval: intervals.baseline)
+            let baseline = filteredBaseline.isEmpty ? current : filteredBaseline
             let operation = filter.operation
+            let delay = testingCalculationDelay
             calculation = Task.detached(priority: .userInitiated) {
+                if let delay {
+                    try? await Task.sleep(for: delay)
+                }
                 let value = AnalyticsEngine.snapshot(
                     inputs: current,
                     baselineInputs: baseline,
@@ -153,7 +181,10 @@ actor AnalyticsService {
                 )
                 return Task.isCancelled ? nil : value
             }
-            inFlightSnapshots[key] = calculation
+            inFlightSnapshots[key] = InFlightSnapshot(
+                task: calculation,
+                waiterIDs: [waiterID]
+            )
         }
         let clock = ContinuousClock()
         let start = clock.now
@@ -164,23 +195,34 @@ actor AnalyticsService {
                 try Task.checkCancellation()
                 return value
             } onCancel: {
-                calculation.cancel()
+                Task {
+                    await self.cancelSnapshotWaiter(waiterID, for: key)
+                }
             }
-            guard datasetRevision == revision else { throw CancellationError() }
-            if let cached = snapshots[key] {
+            finishSnapshotWaiter(waiterID, for: key)
+            guard datasetRevision == revision else {
+                throw AnalyticsStaleRevisionError(
+                    requestedRevision: revision,
+                    currentRevision: datasetRevision
+                )
+            }
+            if let cached = cachedSnapshot(for: key) {
                 serviceMetrics.cacheHits += 1
                 return AnalyticsServiceResult(value: cached, wasCacheHit: true, calculationMilliseconds: 0)
             }
             let elapsed = milliseconds(start.duration(to: clock.now))
-            snapshots[key] = value
+            storeSnapshot(value, for: key)
             inFlightSnapshots[key] = nil
             serviceMetrics.coldCalculations += 1
             logger.notice("Analytics cold calculation revision=\(revision) milliseconds=\(elapsed, privacy: .public)")
             return AnalyticsServiceResult(value: value, wasCacheHit: false, calculationMilliseconds: elapsed)
         } catch is CancellationError {
-            if calculation.isCancelled { inFlightSnapshots[key] = nil }
+            cancelSnapshotWaiter(waiterID, for: key)
             serviceMetrics.cancelledCalculations += 1
             throw CancellationError()
+        } catch let error as AnalyticsStaleRevisionError {
+            inFlightSnapshots[key] = nil
+            throw error
         }
     }
 
@@ -207,7 +249,12 @@ actor AnalyticsService {
         } onCancel: {
             calculation.cancel()
         }
-        guard datasetRevision == revision else { throw CancellationError() }
+        guard datasetRevision == revision else {
+            throw AnalyticsStaleRevisionError(
+                requestedRevision: revision,
+                currentRevision: datasetRevision
+            )
+        }
         let elapsed = milliseconds(start.duration(to: clock.now))
         recommendationsByRevision[revision] = value
         serviceMetrics.recommendationCalculations += 1
@@ -232,7 +279,12 @@ actor AnalyticsService {
         } onCancel: {
             calculation.cancel()
         }
-        guard datasetRevision == revision else { throw CancellationError() }
+        guard datasetRevision == revision else {
+            throw AnalyticsStaleRevisionError(
+                requestedRevision: revision,
+                currentRevision: datasetRevision
+            )
+        }
         let elapsed = milliseconds(start.duration(to: clock.now))
         historyBaselinesByRevision[revision] = value
         serviceMetrics.historyBaselineCalculations += 1
@@ -240,8 +292,8 @@ actor AnalyticsService {
     }
 
     func invalidate(for revision: Int) {
-        for (key, task) in inFlightSnapshots where key.revision != revision {
-            task.cancel()
+        for (key, inFlight) in inFlightSnapshots where key.revision != revision {
+            inFlight.task.cancel()
         }
         inFlightSnapshots = inFlightSnapshots.filter { $0.key.revision == revision }
         if datasetRevision != revision {
@@ -249,12 +301,17 @@ actor AnalyticsService {
             dataset = nil
         }
         snapshots = snapshots.filter { $0.key.revision == revision }
+        snapshotRecency = snapshotRecency.filter { $0.revision == revision }
         recommendationsByRevision = recommendationsByRevision.filter { $0.key == revision }
         historyBaselinesByRevision = historyBaselinesByRevision.filter { $0.key == revision }
     }
 
     func metrics() -> AnalyticsServiceMetrics {
         serviceMetrics
+    }
+
+    func cachedSnapshotCount() -> Int {
+        snapshots.count
     }
 
     private func loadDataset(revision: Int) throws -> AnalyticsDataset {
@@ -296,16 +353,54 @@ actor AnalyticsService {
         "\(session.benchmarkID ?? "")-v\(session.benchmarkVersion ?? 0)"
     }
 
-    private func intervals(for range: AnalyticsDateRange, now: Date) -> (current: DateInterval?, previous: DateInterval?) {
+    private func intervals(
+        for range: AnalyticsDateRange,
+        now: Date
+    ) -> (current: DateInterval?, previous: DateInterval?, baseline: DateInterval?) {
         guard let days = range.days,
               let start = Calendar.current.date(byAdding: .day, value: -days, to: now),
               let previousStart = Calendar.current.date(byAdding: .day, value: -days, to: start) else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
         return (
             DateInterval(start: start, end: now),
-            DateInterval(start: previousStart, end: start)
+            DateInterval(start: previousStart, end: start),
+            DateInterval(start: .distantPast, end: start)
         )
+    }
+
+    private func cachedSnapshot(for key: AnalyticsSnapshotCacheKey) -> DashboardSnapshot? {
+        guard let value = snapshots[key] else { return nil }
+        snapshotRecency.removeAll { $0 == key }
+        snapshotRecency.append(key)
+        return value
+    }
+
+    private func storeSnapshot(_ snapshot: DashboardSnapshot, for key: AnalyticsSnapshotCacheKey) {
+        snapshots[key] = snapshot
+        snapshotRecency.removeAll { $0 == key }
+        snapshotRecency.append(key)
+        while snapshotRecency.count > Self.snapshotCacheLimit {
+            let evicted = snapshotRecency.removeFirst()
+            snapshots[evicted] = nil
+        }
+    }
+
+    private func finishSnapshotWaiter(_ waiterID: UUID, for key: AnalyticsSnapshotCacheKey) {
+        guard var inFlight = inFlightSnapshots[key] else { return }
+        inFlight.waiterIDs.remove(waiterID)
+        inFlightSnapshots[key] = inFlight
+    }
+
+    private func cancelSnapshotWaiter(_ waiterID: UUID, for key: AnalyticsSnapshotCacheKey) {
+        guard var inFlight = inFlightSnapshots[key] else { return }
+        inFlight.waiterIDs.remove(waiterID)
+        if inFlight.waiterIDs.isEmpty {
+            inFlight.task.cancel()
+            inFlightSnapshots[key] = nil
+        } else {
+            inFlightSnapshots[key] = inFlight
+        }
     }
 
     private func milliseconds(_ duration: Duration) -> Double {
@@ -324,9 +419,13 @@ final class AnalyticsStore {
     private var recommendationTask: Task<Void, Never>?
     private var historyTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
+    private var repositoryChangeTask: Task<Void, Never>?
     private var snapshotRequestID: UUID?
     private var recommendationRequestID: UUID?
     private var historyRequestID: UUID?
+    private var currentSnapshotFilter: AnalyticsFilterKey?
+    private var recommendationsWereRequested = false
+    private var historyWasRequested = false
 
     private(set) var snapshot = DashboardSnapshot()
     private(set) var recommendations: [Recommendation] = []
@@ -353,6 +452,7 @@ final class AnalyticsStore {
 
     func requestSnapshot(for filter: AnalyticsFilterKey, debounce: Bool = true) {
         snapshotTask?.cancel()
+        currentSnapshotFilter = filter
         let requestID = UUID()
         snapshotRequestID = requestID
         let revisionValue = revision.value
@@ -374,6 +474,10 @@ final class AnalyticsStore {
                 logger.notice("Analytics presented cacheHit=\(result.wasCacheHit) milliseconds=\(self.lastPresentationMilliseconds, privacy: .public)")
             } catch is CancellationError {
                 return
+            } catch is AnalyticsStaleRevisionError {
+                if snapshotRequestID == requestID {
+                    requestSnapshot(for: filter, debounce: false)
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -382,6 +486,7 @@ final class AnalyticsStore {
 
     func requestRecommendations() {
         recommendationTask?.cancel()
+        recommendationsWereRequested = true
         let requestID = UUID()
         recommendationRequestID = requestID
         let revisionValue = revision.value
@@ -400,6 +505,10 @@ final class AnalyticsStore {
                 logger.notice("Recommendations presented cacheHit=\(result.wasCacheHit) milliseconds=\(elapsed, privacy: .public)")
             } catch is CancellationError {
                 return
+            } catch is AnalyticsStaleRevisionError {
+                if recommendationRequestID == requestID {
+                    requestRecommendations()
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -408,6 +517,7 @@ final class AnalyticsStore {
 
     func requestHistoryBaseline() {
         historyTask?.cancel()
+        historyWasRequested = true
         let requestID = UUID()
         historyRequestID = requestID
         let revisionValue = revision.value
@@ -426,6 +536,10 @@ final class AnalyticsStore {
                 logger.notice("History presented cacheHit=\(result.wasCacheHit) milliseconds=\(elapsed, privacy: .public)")
             } catch is CancellationError {
                 return
+            } catch is AnalyticsStaleRevisionError {
+                if historyRequestID == requestID {
+                    requestHistoryBaseline()
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -433,6 +547,7 @@ final class AnalyticsStore {
     }
 
     func repositoryDidChange() {
+        repositoryChangeTask?.cancel()
         snapshotTask?.cancel()
         recommendationTask?.cancel()
         historyTask?.cancel()
@@ -444,8 +559,17 @@ final class AnalyticsStore {
         isRefreshingRecommendations = false
         isRefreshingHistory = false
         let revisionValue = revision.value
-        Task { await service.invalidate(for: revisionValue) }
-        prewarmDefaultSnapshot()
+        repositoryChangeTask = Task {
+            await service.invalidate(for: revisionValue)
+            guard !Task.isCancelled else { return }
+            if let currentSnapshotFilter {
+                requestSnapshot(for: currentSnapshotFilter, debounce: false)
+            } else {
+                prewarmDefaultSnapshot()
+            }
+            if recommendationsWereRequested { requestRecommendations() }
+            if historyWasRequested { requestHistoryBaseline() }
+        }
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {

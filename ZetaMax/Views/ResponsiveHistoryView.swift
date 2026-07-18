@@ -18,10 +18,10 @@ enum HistoryLayoutPolicy {
 struct HistoryView: View {
     let repository: SwiftDataRepository
     @Bindable var analyticsStore: AnalyticsStore
-    let revision: RepositoryRevision
     @Query(sort: \PracticeSession.startedAt, order: .reverse) private var sessions: [PracticeSession]
     @State private var selectedID: UUID?
     @State private var searchText = ""
+    @State private var effectiveSearchText = ""
     @State private var deleteCandidate: PracticeSession?
     @State private var exportDocument: ExportDocument?
     @State private var exportFormat: ExportFormat = .csv
@@ -31,14 +31,14 @@ struct HistoryView: View {
 
     private var selected: PracticeSession? { sessions.first { $0.id == selectedID } }
     private var filteredSessions: [PracticeSession] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = effectiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return sessions }
         return sessions.filter { session in
             let searchable = [
                 session.mode.title,
                 session.benchmarkID ?? "",
                 session.startedAt.formatted(date: .long, time: .shortened),
-                session.sortedAttempts.map(\.prompt).joined(separator: " ")
+                session.searchableText
             ].joined(separator: " ")
             return searchable.localizedCaseInsensitiveContains(query)
         }
@@ -72,7 +72,13 @@ struct HistoryView: View {
         }
         .navigationTitle("History")
         .onAppear { analyticsStore.requestHistoryBaseline() }
-        .onChange(of: revision.value) { _, _ in analyticsStore.requestHistoryBaseline() }
+        .task(id: searchText) {
+            if !searchText.isEmpty {
+                try? await Task.sleep(for: .milliseconds(180))
+            }
+            guard !Task.isCancelled else { return }
+            effectiveSearchText = searchText
+        }
         .toolbar {
             Menu("Export all", systemImage: "square.and.arrow.up") {
                 Button("CSV") { export(sessions, as: .csv) }
@@ -192,9 +198,14 @@ struct HistoryView: View {
     }
 
     private func export(_ sessions: [PracticeSession], as format: ExportFormat) {
-        exportFormat = format
-        exportDocument = ExportService.document(for: sessions, format: format)
-        isExporting = true
+        do {
+            exportFormat = format
+            exportDocument = try ExportService.document(for: sessions, format: format)
+            isExporting = true
+        } catch {
+            messageTitle = "Export failed"
+            message = error.localizedDescription
+        }
     }
 
     private var dateStamp: String { Date.now.formatted(.dateTime.year().month().day()) }
@@ -368,7 +379,11 @@ private struct SessionDetailView: View {
         session.sortedAttempts.compactMap { $0.wasEventuallyCorrect ? $0.responseTimeMilliseconds : nil }
     }
     private var medianText: String { Statistics.median(completedTimings.map(Double.init)).map { String(format: "%.2fs", $0 / 1_000) } ?? "—" }
-    private var p90Text: String { Statistics.percentile(completedTimings.map(Double.init), 0.9).map { String(format: "%.2fs", $0 / 1_000) } ?? "—" }
+    private var p90Text: String {
+        guard completedTimings.count >= Statistics.reliableTailSampleCount else { return "—" }
+        return Statistics.percentile(completedTimings.map(Double.init), 0.9)
+            .map { String(format: "%.2fs", $0 / 1_000) } ?? "—"
+    }
     private var questionsPerMinute: Double {
         let elapsed = Double(session.activeElapsedMilliseconds ?? session.durationSeconds * 1_000) / 1_000
         return elapsed > 0 ? Double(completedTimings.count) / (elapsed / 60) : 0

@@ -138,11 +138,11 @@ struct AppRootView: View {
         case .practice:
             PracticeSetupView(engine: engine)
         case .recommendations:
-            RecommendationsView(engine: engine, analyticsStore: analyticsStore, revision: repository.revision)
+            RecommendationsView(engine: engine, analyticsStore: analyticsStore)
         case .analytics:
-            AnalyticsDashboardView(analyticsStore: analyticsStore, revision: repository.revision)
+            AnalyticsDashboardView(analyticsStore: analyticsStore)
         case .history:
-            HistoryView(repository: repository, analyticsStore: analyticsStore, revision: repository.revision)
+            HistoryView(repository: repository, analyticsStore: analyticsStore)
         case .settings:
             SettingsView(repository: repository, appearance: $appearance)
         }

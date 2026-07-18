@@ -25,6 +25,7 @@ final class PracticeSession {
     var correctCount: Int
     var incorrectSubmissionCount: Int
     var activeElapsedMilliseconds: Int?
+    var searchableText: String = ""
 
     @Relationship(deleteRule: .cascade, inverse: \QuestionAttempt.session)
     var attempts: [QuestionAttempt]
@@ -44,6 +45,12 @@ final class PracticeSession {
         correctCount = 0
         incorrectSubmissionCount = 0
         activeElapsedMilliseconds = nil
+        searchableText = [
+            configuration.mode.title,
+            configuration.benchmarkID ?? "",
+            configuration.mode == .targeted ? configuration.targetedPreset.title : "",
+            ISO8601DateFormatter().string(from: startedAt)
+        ].joined(separator: " ")
         attempts = []
     }
 
@@ -69,14 +76,29 @@ final class PracticeSession {
     var completedAttempts: [QuestionAttempt] { attempts.filter(\.wasEventuallyCorrect) }
 
     var firstAttemptAccuracy: Double {
-        guard !attempts.isEmpty else { return 0 }
-        return Double(attempts.filter { $0.wasEventuallyCorrect && $0.incorrectAttempts == 0 }.count) / Double(attempts.count)
+        let submitted = attempts.filter { !$0.submissions.isEmpty }
+        guard !submitted.isEmpty else { return 0 }
+        return Double(submitted.filter { $0.wasEventuallyCorrect && $0.incorrectAttempts == 0 }.count) / Double(submitted.count)
     }
 
     var submissionAccuracy: Double {
         let submissions = attempts.flatMap(\.submissions)
         guard !submissions.isEmpty else { return 0 }
         return Double(submissions.filter(\.isCorrect).count) / Double(submissions.count)
+    }
+
+    func rebuildSearchableText() {
+        searchableText = [
+            mode.title,
+            benchmarkID ?? "",
+            mode == .targeted ? configuration.targetedPreset.title : "",
+            ISO8601DateFormatter().string(from: startedAt),
+            attempts.flatMap { [$0.prompt, $0.categoryName] }.joined(separator: " ")
+        ].joined(separator: " ")
+    }
+
+    func appendToSearchableText(for attempt: QuestionAttempt) {
+        searchableText += " \(attempt.prompt) \(attempt.categoryName)"
     }
 }
 
@@ -96,6 +118,7 @@ final class QuestionAttempt {
     var responseTimeMilliseconds: Int?
     var incorrectAttempts: Int
     var wasEventuallyCorrect: Bool
+    var isCensored: Bool = false
     var position: Int
 
     var session: PracticeSession?
@@ -118,6 +141,7 @@ final class QuestionAttempt {
         responseTimeMilliseconds = nil
         incorrectAttempts = 0
         wasEventuallyCorrect = false
+        isCensored = false
         self.position = position
         submissions = []
     }

@@ -4,6 +4,7 @@ import SwiftUI
 struct FocusedAnswerField: NSViewRepresentable {
     @Binding var text: String
     let onTextChange: (String) -> Void
+    let onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -57,6 +58,7 @@ struct FocusedAnswerField: NSViewRepresentable {
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onSubmit()
                 control.window?.makeFirstResponder(control)
                 return true
             }

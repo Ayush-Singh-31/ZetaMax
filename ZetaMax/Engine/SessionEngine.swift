@@ -102,6 +102,43 @@ final class SessionEngine {
         completeCorrectAnswer(rawInput: rawInput, normalized: normalized, expectedAttemptID: attempt.id)
     }
 
+    func submitCurrentAnswer() {
+        guard phase == .running,
+              let session,
+              let attempt = currentAttempt,
+              submittingAttemptID != attempt.id else { return }
+        let rawInput = answerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawInput.isEmpty else { return }
+        let normalized = DecimalText.parse(rawInput)
+        if normalized == attempt.correctAnswer, let normalized {
+            completeCorrectAnswer(
+                rawInput: rawInput,
+                normalized: normalized,
+                expectedAttemptID: attempt.id
+            )
+            return
+        }
+
+        tick()
+        guard phase == .running, currentAttempt?.id == attempt.id else { return }
+        let responseMilliseconds = max(0, Int((clock.nowSeconds - attemptStartMonotonic) * 1_000))
+        submittingAttemptID = attempt.id
+        defer { submittingAttemptID = nil }
+        let submission = AnswerSubmission(
+            rawInput: rawInput,
+            normalizedAnswer: normalized,
+            submittedAt: .now,
+            elapsedMilliseconds: responseMilliseconds,
+            isCorrect: false
+        )
+        do {
+            try repository.addSubmission(submission, to: attempt, session: session)
+            answerText = ""
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func completeCorrectAnswer(rawInput: String, normalized: Decimal, expectedAttemptID: UUID) {
         guard phase == .running,
               let session,
@@ -207,6 +244,16 @@ final class SessionEngine {
         guard phase == .running, let session else { return }
         timerTask?.cancel()
         let elapsed = max(0, min(Double(configuration.durationSeconds), clock.nowSeconds - sessionStartMonotonic))
+        if status == .completed,
+           reason == .timerExpired,
+           let currentAttempt,
+           !currentAttempt.wasEventuallyCorrect {
+            currentAttempt.isCensored = true
+            currentAttempt.responseTimeMilliseconds = max(
+                0,
+                Int((deadline - attemptStartMonotonic) * 1_000)
+            )
+        }
         do {
             try repository.finish(
                 session,

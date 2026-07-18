@@ -252,12 +252,13 @@ struct ActivePracticeView: View {
 
                 FocusedAnswerField(
                     text: $engine.answerText,
-                    onTextChange: engine.answerDidChange
+                    onTextChange: engine.answerDidChange,
+                    onSubmit: engine.submitCurrentAnswer
                 )
                 .frame(width: 320, height: 58)
                 .accessibilityIdentifier("answerField")
 
-                Label("Auto-submit enabled", systemImage: "checkmark.circle")
+                Label("Correct answers auto-submit · Return records an incorrect answer", systemImage: "checkmark.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -311,7 +312,7 @@ struct SessionResultsView: View {
                 ZetaMetricTile(title: "Completed", value: String(session?.correctCount ?? 0), tint: ZetaTheme.brand)
                 ZetaMetricTile(title: "Questions/min", value: String(format: "%.1f", questionsPerMinute), tint: ZetaTheme.cyan)
                 ZetaMetricTile(title: "Median", value: milliseconds(median), tint: ZetaTheme.caution)
-                ZetaMetricTile(title: "P90", value: milliseconds(p90), tint: Color(red: 0.62, green: 0.34, blue: 0.92))
+                ZetaMetricTile(title: "P90", value: p90Text, tint: Color(red: 0.62, green: 0.34, blue: 0.92))
             }
             .frame(maxWidth: 760)
             HStack {
@@ -335,6 +336,10 @@ struct SessionResultsView: View {
     }
     private var p90: Double {
         Statistics.percentile(session?.completedAttempts.compactMap(\.responseTimeMilliseconds).map(Double.init) ?? [], 0.9) ?? 0
+    }
+    private var p90Text: String {
+        guard (session?.completedAttempts.count ?? 0) >= Statistics.reliableTailSampleCount else { return "—" }
+        return milliseconds(p90)
     }
     private var questionsPerMinute: Double {
         guard let session else { return 0 }

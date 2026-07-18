@@ -12,8 +12,6 @@ private enum OverviewTrendMetric: String, CaseIterable, Identifiable {
 
 struct AnalyticsOverviewView: View {
     let snapshot: DashboardSnapshot
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.zetaReduceMotionOverride) private var reduceMotionOverride
     @State private var trendMetric: OverviewTrendMetric = .median
     @State private var selectedDate: Date?
     @State private var selectedPaceID: UUID?
@@ -56,9 +54,15 @@ struct AnalyticsOverviewView: View {
             )
             ZetaMetricTile(
                 title: "P90",
-                value: AnalyticsFormatting.time(snapshot.p90Milliseconds),
-                detail: "Slow-tail time",
-                change: comparison(.p90Time),
+                value: snapshot.completedCount >= Statistics.reliableTailSampleCount
+                    ? AnalyticsFormatting.time(snapshot.p90Milliseconds)
+                    : "—",
+                detail: snapshot.completedCount >= Statistics.reliableTailSampleCount
+                    ? "Slow-tail time"
+                    : "Needs \(Statistics.reliableTailSampleCount) timings",
+                change: snapshot.completedCount >= Statistics.reliableTailSampleCount
+                    ? comparison(.p90Time)
+                    : nil,
                 tint: Color(red: 0.62, green: 0.34, blue: 0.92)
             )
             ZetaMetricTile(
@@ -140,10 +144,13 @@ struct AnalyticsOverviewView: View {
                 .chartXAxisLabel(xAxisTitle)
                 .chartYAxisLabel(axisLabel)
                 .chartLegend(.hidden)
+                .chartPlotStyle { plotArea in
+                    plotArea.padding(.horizontal, 8)
+                }
                 .frame(height: 320)
-                .animation(reduceMotion || reduceMotionOverride ? nil : .easeOut(duration: 0.16), value: trendMetric)
                 .accessibilityLabel("Performance trend, \(trendMetric.rawValue)")
                 .accessibilityValue(trendAccessibilitySummary)
+                .id(trendMetric)
 
                 HStack(spacing: 16) {
                     Label(trendMetric.rawValue, systemImage: "line.diagonal")
@@ -191,13 +198,15 @@ struct AnalyticsOverviewView: View {
                         )
                         .foregroundStyle(ZetaTheme.color(for: operation.operation).opacity(0.72))
                         .cornerRadius(3)
-                        PointMark(
-                            x: .value("P90 seconds", operation.p90Milliseconds / 1_000),
-                            y: .value("Operation", operation.operation.title)
-                        )
-                        .foregroundStyle(ZetaTheme.color(for: operation.operation))
-                        .symbol(.diamond)
-                        .symbolSize(52)
+                        if operation.attempts >= Statistics.reliableTailSampleCount {
+                            PointMark(
+                                x: .value("P90 seconds", operation.p90Milliseconds / 1_000),
+                                y: .value("Operation", operation.operation.title)
+                            )
+                            .foregroundStyle(ZetaTheme.color(for: operation.operation))
+                            .symbol(.diamond)
+                            .symbolSize(52)
+                        }
                     }
                 }
                 .chartXScale(domain: operationDomain)
@@ -247,6 +256,14 @@ struct AnalyticsOverviewView: View {
                         .foregroundStyle(distributionColor(bin))
                         .opacity(selectedDistributionBin == nil || selectedDistributionBin?.id == bin.id ? 1 : 0.28)
                     }
+                    RuleMark(x: .value("Overflow threshold", 10))
+                        .foregroundStyle(ZetaTheme.caution.opacity(0.55))
+                        .lineStyle(StrokeStyle(dash: [3, 3]))
+                        .annotation(position: .top, alignment: .leading) {
+                            Text("10s+")
+                                .font(.caption2)
+                                .foregroundStyle(ZetaTheme.caution)
+                        }
                 }
                 .chartXSelection(value: $selectedDistributionSeconds)
                 .chartXScale(domain: distributionDomain)
@@ -307,8 +324,10 @@ struct AnalyticsOverviewView: View {
         HStack(spacing: 5) {
             Button { moveTrendSelection(-1) } label: { Image(systemName: "chevron.left") }
                 .help("Previous point")
+                .accessibilityLabel("Previous trend point")
             Button { moveTrendSelection(1) } label: { Image(systemName: "chevron.right") }
                 .help("Next point")
+                .accessibilityLabel("Next trend point")
             if let selectedTrend {
                 Text(selectedTrend.date, format: .dateTime.month(.abbreviated).day())
                     .font(.caption)
@@ -422,7 +441,10 @@ struct AnalyticsOverviewView: View {
     private func trendValue(_ point: TrendPoint) -> Double? {
         switch trendMetric {
         case .median: point.medianMilliseconds / 1_000
-        case .p90: point.p90Milliseconds / 1_000
+        case .p90:
+            point.sampleCount >= Statistics.reliableTailSampleCount
+                ? point.p90Milliseconds / 1_000
+                : nil
         case .throughput: point.questionsPerMinute
         case .speed: point.speedIndex
         case .benchmark: point.benchmarkScore
@@ -487,7 +509,7 @@ struct AnalyticsOverviewView: View {
     }
 
     private var trendDateDomain: ClosedRange<Date> {
-        guard let first = trendPlotPoints.first?.date, let last = trendPlotPoints.last?.date else {
+        guard let first = snapshot.trends.first?.date, let last = snapshot.trends.last?.date else {
             let now = Date.now
             return now.addingTimeInterval(-3_600)...now.addingTimeInterval(3_600)
         }
@@ -525,7 +547,10 @@ struct AnalyticsOverviewView: View {
     }
 
     private var operationDomain: ClosedRange<Double> {
-        let maximum = snapshot.operations.map { $0.p90Milliseconds / 1_000 }.max() ?? 1
+        let tailValues = snapshot.operations
+            .filter { $0.attempts >= Statistics.reliableTailSampleCount }
+            .map { $0.p90Milliseconds / 1_000 }
+        let maximum = (tailValues + snapshot.operations.map { $0.medianMilliseconds / 1_000 }).max() ?? 1
         return 0...max(maximum * 1.12, 1)
     }
 
@@ -538,12 +563,15 @@ struct AnalyticsOverviewView: View {
 
     private var operationAccessibilitySummary: String {
         snapshot.operations.map {
-            "\($0.operation.title), median \(AnalyticsFormatting.time($0.medianMilliseconds)), P90 \(AnalyticsFormatting.time($0.p90Milliseconds))"
+            let p90 = $0.attempts >= Statistics.reliableTailSampleCount
+                ? AnalyticsFormatting.time($0.p90Milliseconds)
+                : "needs \(Statistics.reliableTailSampleCount) samples"
+            return "\($0.operation.title), median \(AnalyticsFormatting.time($0.medianMilliseconds)), P90 \(p90)"
         }.joined(separator: ". ")
     }
 
     private func distributionUpperBound(_ bin: DistributionBin) -> Double {
-        bin.isOverflow ? 10.5 : Double(bin.upperMilliseconds) / 1_000
+        bin.isOverflow ? 11 : Double(bin.upperMilliseconds) / 1_000
     }
 
     private func distributionColor(_ bin: DistributionBin) -> Color {
@@ -555,7 +583,7 @@ struct AnalyticsOverviewView: View {
     private var distributionDomain: ClosedRange<Double> {
         let lastNonempty = snapshot.distribution.last(where: { $0.count > 0 })
         let upper = lastNonempty.map(distributionUpperBound) ?? 3
-        return 0...max(min(upper, 10.5), 3)
+        return 0...max(min(upper, 11), 3)
     }
 
     private var visibleDistributionBins: [DistributionBin] {

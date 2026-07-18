@@ -33,7 +33,6 @@ enum AnalyticsFormatting {
 
 struct AnalyticsDashboardView: View {
     @Bindable var analyticsStore: AnalyticsStore
-    let revision: RepositoryRevision
     @State private var section: AnalyticsSection = .overview
     @State private var dateRange: AnalyticsDateRange = .month
     @State private var mode: PracticeMode?
@@ -107,9 +106,6 @@ struct AnalyticsDashboardView: View {
         }
         .onChange(of: filterKey) { _, key in
             analyticsStore.requestSnapshot(for: key)
-        }
-        .onChange(of: revision.value) { _, _ in
-            analyticsStore.requestSnapshot(for: filterKey, debounce: false)
         }
     }
 

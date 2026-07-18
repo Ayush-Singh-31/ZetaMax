@@ -72,6 +72,18 @@ final class QuestionGeneratorTests: XCTestCase {
         }
     }
 
+    func testAdditionCategoryDetectsCarryInAnyDigitPosition() {
+        var configuration = PracticeConfiguration.classicDefault
+        configuration.operations = [.addition]
+        configuration.additionLeft = OperandRange(91, 91)
+        configuration.additionRight = OperandRange(92, 92)
+        let question = QuestionGenerator(seed: 10).nextQuestion(
+            configuration: configuration,
+            categoryWeights: [:]
+        )
+        XCTAssertEqual(question.category.key, "addition/carrying-required")
+    }
+
     func testDecimalInputNormalization() {
         XCTAssertEqual(DecimalText.parse(" -1.50 "), Decimal(string: "-1.5"))
         XCTAssertEqual(DecimalText.parse(".25"), Decimal(string: "0.25"))
@@ -132,11 +144,14 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(snapshot.slowestCompletions.first?.responseMilliseconds, 2_000)
 
         let csv = ExportService.csv(sessions: fetched)
+        XCTAssertTrue(csv.contains("\"schema_version\""))
+        XCTAssertTrue(csv.contains("\n\"2\","))
         XCTAssertTrue(csv.contains("\"7 × 8\""))
         XCTAssertTrue(csv.contains("\"54|56\""))
-        let json = ExportService.document(for: fetched, format: .json).data
+        let json = try ExportService.document(for: fetched, format: .json).data
         let object = try JSONSerialization.jsonObject(with: json) as? [String: Any]
-        XCTAssertEqual(object?["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(object?["schemaVersion"] as? Int, 2)
+        XCTAssertTrue(fetched[0].searchableText.contains("7 × 8"))
     }
 
     func testRecoveryAndCascadeDeletion() throws {
@@ -227,7 +242,20 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
 
     func testStatisticsAndExpectedScore() throws {
         XCTAssertEqual(Statistics.median([1, 2, 3, 4]), 2.5)
-        XCTAssertEqual(Statistics.percentile([1, 2, 3, 4, 5], 0.9), 5)
+        XCTAssertEqual(Statistics.percentile([1, 2, 3, 4, 5], 0.9) ?? 0, 4.6, accuracy: 0.001)
+        XCTAssertEqual(Statistics.percentile([1, 2, 3, 4], 0.5), Statistics.median([1, 2, 3, 4]))
+        XCTAssertEqual(
+            Statistics.rightCensoredPercentile(
+                [
+                    .init(value: 1_000, isEvent: true),
+                    .init(value: 2_000, isEvent: true),
+                    .init(value: 5_000, isEvent: false)
+                ],
+                0.9
+            ),
+            5_000,
+            "An unobservable tail quantile should report the censoring lower bound, not a biased completed-only value"
+        )
         XCTAssertEqual(Statistics.medianAbsoluteDeviation([1, 1, 1, 2]), 0)
     }
 
@@ -279,7 +307,7 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(session.incorrectSubmissionCount, 7, "Fixture proves legacy errors exist but timing analytics ignore them")
     }
 
-    func testAdaptiveVersionTwoUsesOnlyTimingAndRebuildsLegacyEstimates() throws {
+    func testAdaptiveVersionThreeUsesTimingAndRecordedAccuracyAndRebuildsLegacyEstimates() throws {
         let container = try DataStore.makeContainer(inMemory: true)
         let repository = SwiftDataRepository(context: container.mainContext)
         let start = Date(timeIntervalSince1970: 20_000)
@@ -300,15 +328,15 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         try repository.finish(session, status: .completed, reason: .timerExpired, at: start.addingTimeInterval(120), elapsedMilliseconds: 120_000)
 
         let estimate = try XCTUnwrap(AdaptiveModel.estimates(from: [session]).first)
-        XCTAssertEqual(estimate.algorithmVersion, 2)
-        XCTAssertEqual(estimate.estimatedAccuracy, 1, "Legacy correctness is a compatibility placeholder only")
+        XCTAssertEqual(estimate.algorithmVersion, 3)
+        XCTAssertEqual(estimate.estimatedAccuracy, 0.5)
         XCTAssertEqual(estimate.estimatedResponseMilliseconds, 1_500)
         XCTAssertEqual(estimate.deterioration, 1)
 
         estimate.algorithmVersion = 1
         try repository.replaceSkillEstimates(with: [estimate])
         try repository.rebuildSkillEstimatesIfNeeded()
-        XCTAssertEqual(try repository.fetchSkillEstimates().first?.algorithmVersion, 2)
+        XCTAssertEqual(try repository.fetchSkillEstimates().first?.algorithmVersion, 3)
     }
 
     func testTimingOnlyRecommendationWeightsPreferSlowSupportedCategory() throws {
@@ -400,9 +428,11 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(snapshot.speedIndex, 150, accuracy: 0.001, "Normalization must use all-time category baselines, not the filtered median")
         XCTAssertEqual(snapshot.pace.sessions.count, 3)
         XCTAssertFalse(snapshot.pace.representative.isEmpty)
+        XCTAssertNotNil(snapshot.benchmarkProjections.first { $0.durationSeconds == 120 }?.expected)
+        XCTAssertNotNil(snapshot.priorPeriod[.projectedScore])
     }
 
-    func testEmptyAndOneSessionSnapshotsUseFallbacksAndProjectEveryBenchmarkDuration() throws {
+    func testEmptyAndOneSessionSnapshotsUseFallbacksAndRequireComparableProjectionSessions() throws {
         let empty = AnalyticsEngine.snapshot(sessions: [])
         XCTAssertEqual(empty.sessionCount, 0)
         XCTAssertEqual(empty.completedCount, 0)
@@ -449,14 +479,17 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertEqual(snapshot.completedCount, 20)
         XCTAssertEqual(snapshot.trendResolution, .session)
         XCTAssertEqual(snapshot.trends.map(\.sessionID), [completed.id])
-        XCTAssertEqual(snapshot.distributionSummary.q1Milliseconds, 900)
+        XCTAssertEqual(snapshot.distributionSummary.q1Milliseconds, 975)
         XCTAssertEqual(snapshot.distributionSummary.medianMilliseconds, 1_450)
-        XCTAssertEqual(snapshot.distributionSummary.q3Milliseconds, 1_900)
-        XCTAssertEqual(snapshot.distributionSummary.p90Milliseconds, 2_200)
+        XCTAssertEqual(snapshot.distributionSummary.q3Milliseconds, 1_925)
+        XCTAssertEqual(snapshot.distributionSummary.p90Milliseconds, 2_210)
         XCTAssertEqual(snapshot.pace.sessions.count, 1)
         XCTAssertTrue(snapshot.pace.representative.isEmpty, "A representative pace needs at least three sessions")
         XCTAssertEqual(snapshot.benchmarkProjections.map(\.durationSeconds), [30, 60, 120, 300, 600])
-        XCTAssertTrue(snapshot.benchmarkProjections.allSatisfy { $0.expected != nil })
+        XCTAssertTrue(
+            snapshot.benchmarkProjections.allSatisfy { $0.expected == nil },
+            "One session cannot express between-session uncertainty"
+        )
     }
 
     func testOperationFilterAppliesToEveryAttemptDerivedDashboardValue() throws {
@@ -530,9 +563,8 @@ final class PersistenceAndAnalyticsTests: XCTestCase {
         XCTAssertTrue(snapshot.benchmarkProfiles.contains { $0.version == 2 && $0.personalBest == 11 })
         XCTAssertEqual(snapshot.benchmarkResults.map(\.activeDurationSeconds), [120, 120])
         XCTAssertEqual(snapshot.benchmarkResults.first?.questionsPerMinute ?? 0, 4.5, accuracy: 0.001)
-        let standardProjection = snapshot.benchmarkProjections.first { $0.durationSeconds == 120 }?.expected?.median
-        XCTAssertNotNil(standardProjection)
-        XCTAssertTrue(snapshot.benchmarkProfiles.allSatisfy { $0.projectedScore == standardProjection })
+        XCTAssertNil(snapshot.benchmarkProjections.first { $0.durationSeconds == 120 }?.expected)
+        XCTAssertTrue(snapshot.benchmarkProfiles.allSatisfy { $0.projectedScore == nil })
     }
 
     func testGeneralizedOperandExplorerUsesDenseGridsAndRankedUnaryFallbacks() throws {
@@ -763,7 +795,7 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(completedAttempt.submissions.first?.isCorrect, true)
     }
 
-    func testWrongTypingRemainsEditableAndIsNeverPersisted() throws {
+    func testWrongTypingRemainsEditableUntilReturnRecordsSubmission() throws {
         let container = try DataStore.makeContainer(inMemory: true)
         let repository = SwiftDataRepository(context: container.mainContext)
         let clock = ManualClock()
@@ -776,15 +808,20 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertTrue(attempt.submissions.isEmpty)
         XCTAssertEqual(engine.answerText, "999")
 
+        engine.submitCurrentAnswer()
+        XCTAssertEqual(attempt.submissions.count, 1)
+        XCTAssertEqual(attempt.submissions.first?.isCorrect, false)
+        XCTAssertEqual(engine.answerText, "")
+
         clock.value += 3.25
         let correct = attempt.correctAnswerText
         engine.answerText = correct
         engine.answerDidChange(correct)
-        XCTAssertEqual(attempt.submissions.count, 1)
-        XCTAssertEqual(attempt.submissions.first?.isCorrect, true)
+        XCTAssertEqual(attempt.submissions.count, 2)
+        XCTAssertEqual(attempt.submissions.filter(\.isCorrect).count, 1)
         XCTAssertEqual(attempt.responseTimeMilliseconds, 3_250)
-        XCTAssertEqual(attempt.incorrectAttempts, 0)
-        XCTAssertEqual(try repository.fetchSessions().first?.incorrectSubmissionCount, 0)
+        XCTAssertEqual(attempt.incorrectAttempts, 1)
+        XCTAssertEqual(try repository.fetchSessions().first?.incorrectSubmissionCount, 1)
         XCTAssertEqual(engine.score, 1)
     }
 
@@ -822,6 +859,9 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(engine.phase, .results)
         XCTAssertEqual(engine.score, 0)
         XCTAssertTrue(try repository.fetchSessions().first?.sortedAttempts.first?.submissions.isEmpty == true)
+        let censored = try XCTUnwrap(try repository.fetchSessions().first?.sortedAttempts.first)
+        XCTAssertTrue(censored.isCensored)
+        XCTAssertEqual(censored.responseTimeMilliseconds, 15_000)
     }
 
     func testDeadlineUsesInjectedMonotonicClock() throws {
@@ -868,6 +908,70 @@ final class AnalyticsServiceTests: XCTestCase {
         XCTAssertEqual(metrics.cacheHits, 1)
     }
 
+    func testCancellingOneWaiterDoesNotCancelSharedSnapshotCalculation() async throws {
+        let service = AnalyticsService(
+            testingSessions: [],
+            calculationDelay: .milliseconds(80)
+        )
+        let cancelledWaiter = Task {
+            try await service.snapshot(for: .default30Days, revision: 0)
+        }
+        try await Task.sleep(for: .milliseconds(10))
+        let survivingWaiter = Task {
+            try await service.snapshot(for: .default30Days, revision: 0)
+        }
+        cancelledWaiter.cancel()
+
+        do {
+            _ = try await cancelledWaiter.value
+            XCTFail("The explicitly cancelled waiter should stop")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let result = try await survivingWaiter.value
+        XCTAssertFalse(result.wasCacheHit)
+        let metrics = await service.metrics()
+        XCTAssertEqual(metrics.coldCalculations, 1)
+        XCTAssertGreaterThanOrEqual(metrics.cancelledCalculations, 1)
+    }
+
+    func testRevisionMismatchUsesDistinctStaleRevisionError() async throws {
+        let service = AnalyticsService(
+            testingSessions: [],
+            calculationDelay: .milliseconds(80)
+        )
+        let stale = Task {
+            try await service.snapshot(for: .default30Days, revision: 0)
+        }
+        try await Task.sleep(for: .milliseconds(10))
+        let current = Task {
+            try await service.snapshot(for: .default30Days, revision: 1)
+        }
+
+        do {
+            _ = try await stale.value
+            XCTFail("The superseded request should report a stale revision")
+        } catch let error as AnalyticsStaleRevisionError {
+            XCTAssertEqual(error.requestedRevision, 0)
+            XCTAssertEqual(error.currentRevision, 1)
+        }
+        _ = try await current.value
+    }
+
+    func testSnapshotCacheIsBounded() async throws {
+        let service = AnalyticsService(testingSessions: [])
+        for index in 0..<24 {
+            let filter = AnalyticsFilterKey(
+                dateRange: AnalyticsDateRange.allCases[index % AnalyticsDateRange.allCases.count],
+                mode: PracticeMode.allCases[(index / 4) % PracticeMode.allCases.count],
+                operation: ArithmeticOperation.allCases[(index / 16) % ArithmeticOperation.allCases.count]
+            )
+            _ = try await service.snapshot(for: filter, revision: 0)
+        }
+        let cachedCount = await service.cachedSnapshotCount()
+        XCTAssertLessThanOrEqual(cachedCount, 16)
+    }
+
     func testBackgroundContextConvertsSwiftDataToImmutableInputs() async throws {
         let container = try DataStore.makeContainer(inMemory: true)
         let repository = SwiftDataRepository(context: container.mainContext)
@@ -900,6 +1004,61 @@ final class AnalyticsServiceTests: XCTestCase {
         XCTAssertEqual(result.value.completedCount, 1)
         XCTAssertEqual(result.value.medianMilliseconds, 800)
         XCTAssertEqual(result.value.operandExplorers.first?.operation, .addition)
+    }
+
+    func testDateWindowBaselineExcludesTheEvaluatedWindow() async throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func session(startedAt: Date, milliseconds: Int) -> AnalyticsSessionInput {
+            let sessionID = UUID()
+            let attempts = (0..<10).map { position in
+                let presentedAt = startedAt.addingTimeInterval(Double(position) * 3)
+                return AnalyticsAttemptInput(
+                    operation: .addition,
+                    kind: .standard,
+                    categoryKey: "addition/core",
+                    categoryName: "Addition · core",
+                    leftOperandText: "2",
+                    rightOperandText: "3",
+                    prompt: "2 + 3",
+                    presentedAt: presentedAt,
+                    answeredAt: presentedAt.addingTimeInterval(Double(milliseconds) / 1_000),
+                    responseTimeMilliseconds: milliseconds,
+                    wasEventuallyCorrect: true,
+                    position: position,
+                    sessionID: sessionID,
+                    sessionStartedAt: startedAt,
+                    sessionMode: .classic
+                )
+            }
+            return AnalyticsSessionInput(
+                id: sessionID,
+                startedAt: startedAt,
+                durationSeconds: 120,
+                isComparable: true,
+                mode: .classic,
+                configuration: .classicDefault,
+                correctCount: attempts.count,
+                activeElapsedMilliseconds: 120_000,
+                attempts: attempts
+            )
+        }
+
+        let historical = session(
+            startedAt: now.addingTimeInterval(-40 * 86_400),
+            milliseconds: 2_000
+        )
+        let current = session(
+            startedAt: now.addingTimeInterval(-86_400),
+            milliseconds: 1_000
+        )
+        let service = AnalyticsService(testingSessions: [historical, current])
+        let result = try await service.snapshot(
+            for: .default30Days,
+            revision: 0,
+            now: now
+        )
+        XCTAssertEqual(result.value.globalBaselineMilliseconds, 2_000)
+        XCTAssertEqual(result.value.speedIndex, 200, accuracy: 0.001)
     }
 
     func testCacheHitsFilterKeysRevisionInvalidationAndDerivedCaches() async throws {

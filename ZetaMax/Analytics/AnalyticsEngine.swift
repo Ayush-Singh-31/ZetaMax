@@ -13,6 +13,7 @@ struct AnalyticsAttemptInput: Identifiable, Hashable, Sendable {
     let answeredAt: Date?
     let responseTimeMilliseconds: Int?
     let wasEventuallyCorrect: Bool
+    let isCensored: Bool
     let position: Int
     let sessionID: UUID
     let sessionStartedAt: Date
@@ -31,6 +32,7 @@ struct AnalyticsAttemptInput: Identifiable, Hashable, Sendable {
         answeredAt: Date?,
         responseTimeMilliseconds: Int?,
         wasEventuallyCorrect: Bool,
+        isCensored: Bool = false,
         position: Int,
         sessionID: UUID,
         sessionStartedAt: Date,
@@ -48,6 +50,7 @@ struct AnalyticsAttemptInput: Identifiable, Hashable, Sendable {
         self.answeredAt = answeredAt
         self.responseTimeMilliseconds = responseTimeMilliseconds
         self.wasEventuallyCorrect = wasEventuallyCorrect
+        self.isCensored = isCensored
         self.position = position
         self.sessionID = sessionID
         self.sessionStartedAt = sessionStartedAt
@@ -67,6 +70,7 @@ struct AnalyticsAttemptInput: Identifiable, Hashable, Sendable {
         answeredAt = attempt.answeredAt
         responseTimeMilliseconds = attempt.responseTimeMilliseconds
         wasEventuallyCorrect = attempt.wasEventuallyCorrect
+        isCensored = attempt.isCensored
         position = attempt.position
         sessionID = session.id
         sessionStartedAt = session.startedAt
@@ -171,7 +175,7 @@ struct CategoryMetric: Identifiable, Hashable, Sendable {
     let difficultyIndex: Double
     let recentSpeedChange: Double?
     var id: String { key }
-    var isLowSample: Bool { attempts < 10 }
+    var isLowSample: Bool { attempts < Statistics.reliableTailSampleCount }
 }
 
 enum TrendResolution: String, Hashable, Sendable {
@@ -391,7 +395,6 @@ struct BenchmarkProfileSummary: Identifiable, Hashable, Sendable {
     let personalBest: Int
     let recentScore: Int?
     let projectedScore: Int?
-    let gapToPersonalBest: Int?
     let sampleCount: Int
     var id: String { profileKey }
 }
@@ -467,6 +470,17 @@ private struct TimedAttempt: Sendable {
     let milliseconds: Double
 }
 
+private struct TimingObservation: Sendable {
+    let attempt: AnalyticsAttemptInput
+    let milliseconds: Double
+    let isEvent: Bool
+}
+
+private struct ProjectionObservation: Sendable {
+    let milliseconds: Int
+    let isCompleted: Bool
+}
+
 private struct TimingBaselines: Sendable {
     let globalMedian: Double
     let categories: [String: Double]
@@ -515,6 +529,7 @@ enum AnalyticsEngine {
         let comparablePrevious = previousSessions?.filter(\.isComparable)
         let baselines = timingBaselines(referenceSessions)
         let timed = timedAttempts(comparableSessions, operation: operation)
+        let observations = timingObservations(comparableSessions, operation: operation)
         let responseTimes = timed.map(\.milliseconds)
         let normalized = normalizedEfforts(timed, baselines: baselines)
         let totalDuration = activeDurationSeconds(comparableSessions)
@@ -525,25 +540,29 @@ enum AnalyticsEngine {
         snapshot.completedCount = timed.count
         snapshot.questionsPerMinute = qpm
         snapshot.throughputLabel = operation.map { "\($0.title)/min" } ?? "Questions/min"
-        snapshot.medianMilliseconds = Statistics.median(responseTimes) ?? 0
-        snapshot.p90Milliseconds = Statistics.percentile(responseTimes, 0.9) ?? 0
+        snapshot.medianMilliseconds = timingPercentile(observations, 0.5) ?? 0
+        snapshot.p90Milliseconds = timingPercentile(observations, 0.9) ?? 0
         snapshot.speedIndex = speedIndex(normalized)
         snapshot.consistency = consistency(normalized)
         snapshot.recentSpeedChange = recentSpeedChange(timed, baselines: baselines)
         snapshot.globalBaselineMilliseconds = baselines.globalMedian
         snapshot.categoryBaselines = baselines.categories
-        snapshot.operations = operationMetrics(timed, baselines: baselines)
-        snapshot.categories = categoryMetrics(timed, baselines: baselines)
+        snapshot.operations = operationMetrics(timed, observations: observations, baselines: baselines)
+        snapshot.categories = categoryMetrics(timed, observations: observations, baselines: baselines)
         let trendResult = trends(comparableSessions, operation: operation, baselines: baselines, calendar: calendar)
         snapshot.trends = trendResult.points
         snapshot.trendResolution = trendResult.resolution
         snapshot.distribution = distribution(responseTimes)
         snapshot.distributionSummary = distributionSummary(responseTimes)
-        snapshot.sessionPace = paceThroughSession(comparableSessions, operation: operation, baselines: baselines)
+        snapshot.sessionPace = paceThroughSession(
+            comparableSessions,
+            timed: timed,
+            baselines: baselines
+        )
         snapshot.sessionPaceChangePercent = sessionPaceChange(snapshot.sessionPace)
         snapshot.operandExplorers = operandExplorers(timed)
         snapshot.slowestCompletions = slowestCompletions(timed, baselines: baselines)
-        snapshot.pace = cumulativePace(comparableSessions, operation: operation)
+        snapshot.pace = cumulativePace(comparableSessions, timed: timed)
         snapshot.benchmarkProjections = BenchmarkProfile.builtIns.map {
             BenchmarkProjection(
                 durationSeconds: $0.durationSeconds,
@@ -601,10 +620,12 @@ enum AnalyticsEngine {
             let slowness = min(max(relative - 1, 0), 1)
             let days = estimate.lastPracticedAt.map { now.timeIntervalSince($0) / 86_400 } ?? 14
             let recency = min(max(days / 14, 0), 1)
-            let severity = 0.50 * slowness
-                + 0.25 * min(max(estimate.deterioration, 0), 1)
-                + 0.15 * recency
-                + 0.10 * min(max(estimate.uncertainty, 0), 1)
+            let severity = AdaptiveModelParameters.severity(
+                slowness: slowness,
+                deterioration: estimate.deterioration,
+                recency: recency,
+                uncertainty: estimate.uncertainty
+            )
             return Recommendation(
                 id: estimate.categoryKey,
                 kind: .category(categoryKey: estimate.categoryKey),
@@ -619,9 +640,10 @@ enum AnalyticsEngine {
         }
 
         let comparableSessions = sessions.filter(\.isComparable)
+        let comparableTimed = timedAttempts(comparableSessions, operation: nil)
         let pacePoints = paceThroughSession(
             comparableSessions,
-            operation: nil,
+            timed: comparableTimed,
             baselines: timingBaselines(comparableSessions)
         )
         if let deterioration = sessionPaceChange(pacePoints), deterioration >= 10 {
@@ -659,8 +681,23 @@ enum AnalyticsEngine {
         operation: ArithmeticOperation? = nil,
         seed: UInt64 = 0x5A455441
     ) -> ExpectedScore? {
-        let times = timedAttempts(sessions.filter(\.isComparable), operation: operation).map { Int($0.milliseconds) }
-        guard times.count >= 20 else { return nil }
+        let comparable = sessions.filter(\.isComparable)
+        let durationRange = (Double(durationSeconds) * 0.75)...(Double(durationSeconds) * 1.5)
+        let blocks = comparable.compactMap { session -> [ProjectionObservation]? in
+            let activeDuration = Double(session.activeElapsedMilliseconds ?? session.durationSeconds * 1_000) / 1_000
+            guard durationRange.contains(activeDuration) else { return nil }
+            let values = timingObservations([session], operation: operation)
+                .sorted { $0.attempt.presentedAt < $1.attempt.presentedAt }
+                .map {
+                    ProjectionObservation(
+                        milliseconds: max(Int($0.milliseconds), 1),
+                        isCompleted: $0.isEvent
+                    )
+                }
+            return values.isEmpty ? nil : values
+        }
+        guard blocks.count >= 3,
+              blocks.flatMap({ $0 }).filter(\.isCompleted).count >= 20 else { return nil }
         var random = SplitMix64(seed: seed ^ UInt64(durationSeconds))
         var simulated: [Int] = []
         simulated.reserveCapacity(1_000)
@@ -670,8 +707,16 @@ enum AnalyticsEngine {
             var score = 0
             while elapsed < durationSeconds * 1_000 {
                 if Task.isCancelled { return nil }
-                elapsed += times.randomElement(using: &random) ?? 1_500
-                if elapsed <= durationSeconds * 1_000 { score += 1 }
+                guard let block = blocks.randomElement(using: &random) else { break }
+                for observation in block {
+                    elapsed += observation.milliseconds
+                    if elapsed <= durationSeconds * 1_000, observation.isCompleted {
+                        score += 1
+                    }
+                    if elapsed > durationSeconds * 1_000 {
+                        break
+                    }
+                }
             }
             simulated.append(score)
         }
@@ -693,13 +738,42 @@ enum AnalyticsEngine {
         }
     }
 
+    private static func timingObservations(
+        _ sessions: [AnalyticsSessionInput],
+        operation: ArithmeticOperation?
+    ) -> [TimingObservation] {
+        sessions.flatMap(\.attempts).compactMap { attempt in
+            guard (operation == nil || attempt.operation == operation),
+                  (attempt.wasEventuallyCorrect || attempt.isCensored),
+                  let milliseconds = attempt.responseTimeMilliseconds,
+                  milliseconds >= 0 else { return nil }
+            return TimingObservation(
+                attempt: attempt,
+                milliseconds: Double(milliseconds),
+                isEvent: attempt.wasEventuallyCorrect
+            )
+        }
+    }
+
+    private static func timingPercentile(
+        _ observations: [TimingObservation],
+        _ percentile: Double
+    ) -> Double? {
+        Statistics.rightCensoredPercentile(
+            observations.map {
+                Statistics.RightCensoredObservation(value: $0.milliseconds, isEvent: $0.isEvent)
+            },
+            percentile
+        )
+    }
+
     private static func timingBaselines(_ sessions: [AnalyticsSessionInput]) -> TimingBaselines {
-        let timed = timedAttempts(sessions, operation: nil)
-        let global = Statistics.median(timed.map(\.milliseconds)) ?? 1_500
-        let grouped = Dictionary(grouping: timed) { $0.attempt.categoryKey }
+        let observations = timingObservations(sessions, operation: nil)
+        let global = timingPercentile(observations, 0.5) ?? 1_500
+        let grouped = Dictionary(grouping: observations) { $0.attempt.categoryKey }
         let categories: [String: Double] = grouped.compactMapValues { values in
             guard values.count >= 5 else { return nil }
-            return Statistics.median(values.map(\.milliseconds)) ?? global
+            return timingPercentile(values, 0.5) ?? global
         }
         return TimingBaselines(globalMedian: max(global, 1), categories: categories)
     }
@@ -736,33 +810,43 @@ enum AnalyticsEngine {
         return (previousMedian / recentMedian - 1) * 100
     }
 
-    private static func operationMetrics(_ timed: [TimedAttempt], baselines: TimingBaselines) -> [OperationMetric] {
-        Dictionary(grouping: timed, by: { $0.attempt.operation }).map { operation, values in
-            let times = values.map(\.milliseconds)
-            let median = Statistics.median(times) ?? 0
+    private static func operationMetrics(
+        _ timed: [TimedAttempt],
+        observations: [TimingObservation],
+        baselines: TimingBaselines
+    ) -> [OperationMetric] {
+        let observationsByOperation = Dictionary(grouping: observations, by: { $0.attempt.operation })
+        return Dictionary(grouping: timed, by: { $0.attempt.operation }).map { operation, values in
+            let operationObservations = observationsByOperation[operation] ?? []
+            let median = timingPercentile(operationObservations, 0.5) ?? 0
             return OperationMetric(
                 operation: operation,
                 attempts: values.count,
                 medianMilliseconds: median,
-                p90Milliseconds: Statistics.percentile(times, 0.9) ?? 0,
+                p90Milliseconds: timingPercentile(operationObservations, 0.9) ?? 0,
                 baselineMilliseconds: baselines.globalMedian,
                 difficultyIndex: median / baselines.globalMedian * 100
             )
         }.sorted { $0.operation.rawValue < $1.operation.rawValue }
     }
 
-    private static func categoryMetrics(_ timed: [TimedAttempt], baselines: TimingBaselines) -> [CategoryMetric] {
-        Dictionary(grouping: timed, by: { $0.attempt.categoryKey }).compactMap { key, values in
+    private static func categoryMetrics(
+        _ timed: [TimedAttempt],
+        observations: [TimingObservation],
+        baselines: TimingBaselines
+    ) -> [CategoryMetric] {
+        let observationsByCategory = Dictionary(grouping: observations, by: { $0.attempt.categoryKey })
+        return Dictionary(grouping: timed, by: { $0.attempt.categoryKey }).compactMap { key, values in
             guard let first = values.first else { return nil }
-            let times = values.map(\.milliseconds)
-            let median = Statistics.median(times) ?? 0
+            let categoryObservations = observationsByCategory[key] ?? []
+            let median = timingPercentile(categoryObservations, 0.5) ?? 0
             return CategoryMetric(
                 key: key,
                 name: first.attempt.categoryName,
                 operation: first.attempt.operation,
                 attempts: values.count,
                 medianMilliseconds: median,
-                p90Milliseconds: Statistics.percentile(times, 0.9) ?? 0,
+                p90Milliseconds: timingPercentile(categoryObservations, 0.9) ?? 0,
                 baselineMilliseconds: baselines.value(for: key),
                 difficultyIndex: median / baselines.globalMedian * 100,
                 recentSpeedChange: recentSpeedChange(values, baselines: baselines)
@@ -808,13 +892,14 @@ enum AnalyticsEngine {
     ) -> TrendPoint? {
         let timed = timedAttempts(sessions, operation: operation)
         guard !timed.isEmpty else { return nil }
+        let observations = timingObservations(sessions, operation: operation)
         let duration = activeDurationSeconds(sessions)
         let benchmarkScores = operation == nil ? sessions.filter { $0.mode == .benchmark }.map { Double($0.correctCount) } : []
         return TrendPoint(
             id: id,
             date: date,
-            medianMilliseconds: Statistics.median(timed.map(\.milliseconds)) ?? 0,
-            p90Milliseconds: Statistics.percentile(timed.map(\.milliseconds), 0.9) ?? 0,
+            medianMilliseconds: timingPercentile(observations, 0.5) ?? 0,
+            p90Milliseconds: timingPercentile(observations, 0.9) ?? 0,
             speedIndex: speedIndex(normalizedEfforts(timed, baselines: baselines)),
             questionsPerMinute: duration > 0 ? Double(timed.count) / (duration / 60) : 0,
             benchmarkScore: Statistics.median(benchmarkScores),
@@ -825,18 +910,23 @@ enum AnalyticsEngine {
 
     private static func distribution(_ values: [Double]) -> [DistributionBin] {
         guard !values.isEmpty else { return [] }
+        var counts = Array(repeating: 0, count: 21)
+        for value in values {
+            let index = min(max(Int(value) / 500, 0), 20)
+            counts[index] += 1
+        }
         let regular = stride(from: 0, to: 10_000, by: 500).map { lower in
             DistributionBin(
                 lowerMilliseconds: lower,
                 upperMilliseconds: lower + 500,
-                count: values.filter { Int($0) >= lower && Int($0) < lower + 500 }.count,
+                count: counts[lower / 500],
                 isOverflow: false
             )
         }
         return regular + [DistributionBin(
             lowerMilliseconds: 10_000,
             upperMilliseconds: Int.max,
-            count: values.filter { $0 >= 10_000 }.count,
+            count: counts[20],
             isOverflow: true
         )]
     }
@@ -847,7 +937,7 @@ enum AnalyticsEngine {
             count: values.count,
             minimumMilliseconds: minimum,
             q1Milliseconds: Statistics.percentile(values, 0.25) ?? minimum,
-            medianMilliseconds: Statistics.median(values) ?? minimum,
+            medianMilliseconds: Statistics.percentile(values, 0.5) ?? minimum,
             q3Milliseconds: Statistics.percentile(values, 0.75) ?? maximum,
             p90Milliseconds: Statistics.percentile(values, 0.9) ?? maximum,
             maximumMilliseconds: maximum
@@ -856,20 +946,24 @@ enum AnalyticsEngine {
 
     private static func paceThroughSession(
         _ sessions: [AnalyticsSessionInput],
-        operation: ArithmeticOperation?,
+        timed: [TimedAttempt],
         baselines: TimingBaselines
     ) -> [SessionPacePoint] {
-        (0..<5).map { bucket in
+        var buckets = Array(repeating: [TimedAttempt](), count: 5)
+        let timedBySession = Dictionary(grouping: timed) { $0.attempt.sessionID }
+        for session in sessions {
+            let duration = Double(max(1, session.activeElapsedMilliseconds ?? session.durationSeconds * 1_000)) / 1_000
+            for value in timedBySession[session.id] ?? [] {
+                let elapsed = value.attempt.presentedAt.timeIntervalSince(session.startedAt)
+                let fraction = min(max(elapsed / duration, 0), 1)
+                let bucket = min(Int(fraction * 5), 4)
+                buckets[bucket].append(value)
+            }
+        }
+        return (0..<5).map { bucket in
             let lower = Double(bucket) / 5
             let upper = Double(bucket + 1) / 5
-            let timed = sessions.flatMap { session in
-                timedAttempts([session], operation: operation).filter { value in
-                    let elapsed = value.attempt.presentedAt.timeIntervalSince(session.startedAt)
-                    let duration = Double(max(1, session.activeElapsedMilliseconds ?? session.durationSeconds * 1_000)) / 1_000
-                    let fraction = min(max(elapsed / duration, 0), 1)
-                    return fraction >= lower && (bucket == 4 ? fraction <= upper : fraction < upper)
-                }
-            }
+            let timed = buckets[bucket]
             return SessionPacePoint(
                 bucket: bucket,
                 startFraction: lower,
@@ -962,10 +1056,15 @@ enum AnalyticsEngine {
         }
     }
 
-    private static func cumulativePace(_ sessions: [AnalyticsSessionInput], operation: ArithmeticOperation?) -> CumulativePace {
+    private static func cumulativePace(
+        _ sessions: [AnalyticsSessionInput],
+        timed: [TimedAttempt]
+    ) -> CumulativePace {
+        let timedBySession = Dictionary(grouping: timed) { $0.attempt.sessionID }
         let series = sessions.compactMap { session -> SessionPaceSeries? in
             let duration = Double(max(1, session.activeElapsedMilliseconds ?? session.durationSeconds * 1_000)) / 1_000
-            let attempts = timedAttempts([session], operation: operation).sorted { $0.attempt.presentedAt < $1.attempt.presentedAt }
+            let attempts = (timedBySession[session.id] ?? [])
+                .sorted { $0.attempt.presentedAt < $1.attempt.presentedAt }
             guard !attempts.isEmpty else { return nil }
             var points = [CumulativePacePoint(elapsedFraction: 0, elapsedSeconds: 0, completedCount: 0)]
             for (index, value) in attempts.enumerated() {
@@ -1038,7 +1137,6 @@ enum AnalyticsEngine {
                 guard let latest = values.max(by: { $0.startedAt < $1.startedAt }) else { return nil }
                 let personalBest = values.map(\.correctCount).max() ?? 0
                 let projected = projections.first { $0.durationSeconds == latest.durationSeconds }?.expected?.median
-                let comparisonScore = latest.correctCount
                 let profileName = BenchmarkProfile.builtIns.first {
                     $0.id == latest.benchmarkID && $0.version == latest.benchmarkVersion
                 }?.name ?? (latest.benchmarkID ?? "Benchmark")
@@ -1050,7 +1148,6 @@ enum AnalyticsEngine {
                     personalBest: personalBest,
                     recentScore: latest.correctCount,
                     projectedScore: projected,
-                    gapToPersonalBest: comparisonScore - personalBest,
                     sampleCount: values.count
                 )
             }

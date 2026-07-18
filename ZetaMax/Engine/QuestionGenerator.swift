@@ -14,21 +14,27 @@ final class QuestionGenerator: QuestionGenerating {
 
     func nextQuestion(configuration: PracticeConfiguration, categoryWeights: [String: Double] = [:]) -> GeneratedQuestion {
         let configuration = configuration.validated
-        var result: GeneratedQuestion
-        if configuration.mode == .targeted {
-            result = targeted(configuration)
-        } else if configuration.mode == .adaptive, !categoryWeights.isEmpty {
-            let candidates = (0..<20).map { _ in basic(configuration) }
-            result = weightedCandidate(candidates, weights: categoryWeights)
-        } else {
-            result = basic(configuration)
-        }
+        var result = candidate(configuration: configuration, categoryWeights: categoryWeights)
 
         for _ in 0..<4 where result.prompt == lastPrompt {
-            result = configuration.mode == .targeted ? targeted(configuration) : basic(configuration)
+            result = candidate(configuration: configuration, categoryWeights: categoryWeights)
         }
         lastPrompt = result.prompt
         return result
+    }
+
+    private func candidate(
+        configuration: PracticeConfiguration,
+        categoryWeights: [String: Double]
+    ) -> GeneratedQuestion {
+        if configuration.mode == .targeted {
+            return targeted(configuration)
+        }
+        if configuration.mode == .adaptive, !categoryWeights.isEmpty {
+            let candidates = (0..<20).map { _ in basic(configuration) }
+            return weightedCandidate(candidates, weights: categoryWeights)
+        }
+        return basic(configuration)
     }
 
     private func basic(_ configuration: PracticeConfiguration) -> GeneratedQuestion {
@@ -204,7 +210,7 @@ final class QuestionGenerator: QuestionGenerating {
             let rightInt = abs((right.map { $0 as NSDecimalNumber })?.intValue ?? 0)
             let leftDigits = digitBucket(leftInt)
             let rightDigits = digitBucket(rightInt)
-            if operation == .addition && leftInt % 10 + rightInt % 10 >= 10 {
+            if operation == .addition && requiresCarrying(leftInt, rightInt) {
                 detail = "carrying required"
             } else {
                 detail = "\(leftDigits) × \(rightDigits)"
@@ -223,6 +229,20 @@ final class QuestionGenerator: QuestionGenerating {
         case 10...99: "2-digit"
         default: "3+-digit"
         }
+    }
+
+    private func requiresCarrying(_ left: Int, _ right: Int) -> Bool {
+        var left = left
+        var right = right
+        var carry = 0
+        repeat {
+            let sum = left % 10 + right % 10 + carry
+            if sum >= 10 { return true }
+            carry = sum / 10
+            left /= 10
+            right /= 10
+        } while left > 0 || right > 0
+        return false
     }
 
     private func integer(in range: OperandRange) -> Int {
@@ -246,7 +266,10 @@ final class QuestionGenerator: QuestionGenerating {
     }
 
     private func weightedCandidate(_ candidates: [GeneratedQuestion], weights: [String: Double]) -> GeneratedQuestion {
-        let candidateWeights = candidates.map { max(0.0001, weights[$0.category.key] ?? 0.25) }
+        let unseenWeight = AdaptiveModelParameters.explorationRate / Double(max(weights.count, 1))
+        let candidateWeights = candidates.map {
+            max(0.0001, weights[$0.category.key] ?? unseenWeight)
+        }
         let total = candidateWeights.reduce(0, +)
         var threshold = Double.random(in: 0..<total, using: &random)
         for (candidate, weight) in zip(candidates, candidateWeights) {

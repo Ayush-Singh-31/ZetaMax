@@ -58,6 +58,7 @@ final class SwiftDataRepository: AttemptRepository {
         context.insert(attempt)
         attempt.session = session
         session.attempts.append(attempt)
+        session.appendToSearchableText(for: attempt)
         try context.save()
     }
 
@@ -108,6 +109,11 @@ final class SwiftDataRepository: AttemptRepository {
 
     func rebuildSkillEstimatesIfNeeded() throws {
         let sessions = try fetchSessions()
+        let sessionsMissingSearchIndex = sessions.filter(\.searchableText.isEmpty)
+        sessionsMissingSearchIndex.forEach { $0.rebuildSearchableText() }
+        if !sessionsMissingSearchIndex.isEmpty {
+            try context.save()
+        }
         let estimates = try fetchSkillEstimates()
         guard (!sessions.isEmpty && estimates.isEmpty)
                 || estimates.contains(where: { $0.algorithmVersion != AdaptiveModel.algorithmVersion }) else { return }

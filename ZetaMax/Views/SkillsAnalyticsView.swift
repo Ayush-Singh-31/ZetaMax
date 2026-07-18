@@ -108,7 +108,6 @@ struct SkillsAnalyticsView: View {
                 .chartYAxisLabel("Category")
                 .chartLegend(.hidden)
                 .frame(height: 330)
-                .animation(reduceMotion || reduceMotionOverride ? nil : .easeOut(duration: 0.16), value: snapshot.categories)
                 .accessibilityLabel("Recent category change")
 
                 HStack(spacing: 16) {
@@ -247,7 +246,7 @@ struct SkillsAnalyticsView: View {
                 Text("Top 12 by \(operandMetric.rawValue.lowercased())")
                 Spacer()
                 if let cell = selectedRankedCell(explorer) {
-                    Text("\(cell.pairLabel) · median \(AnalyticsFormatting.time(cell.medianMilliseconds)) · P90 \(AnalyticsFormatting.time(cell.p90Milliseconds)) · n=\(cell.count)")
+                    Text("\(cell.pairLabel) · median \(AnalyticsFormatting.time(cell.medianMilliseconds)) · P90 \(p90Label(cell.p90Milliseconds, count: cell.count)) · n=\(cell.count)")
                         .monospacedDigit()
                 } else {
                     Text("Select a row")
@@ -260,9 +259,15 @@ struct SkillsAnalyticsView: View {
     }
 
     private var hierarchyMaximum: Double {
-        max(
-            snapshot.operations.flatMap { [$0.medianMilliseconds, $0.p90Milliseconds, $0.baselineMilliseconds] }.max() ?? 1,
-            snapshot.categories.flatMap { [$0.medianMilliseconds, $0.p90Milliseconds, $0.baselineMilliseconds] }.max() ?? 1
+        let operationTails = snapshot.operations
+            .filter { $0.attempts >= Statistics.reliableTailSampleCount }
+            .map(\.p90Milliseconds)
+        let categoryTails = snapshot.categories
+            .filter { !$0.isLowSample }
+            .map(\.p90Milliseconds)
+        return max(
+            (snapshot.operations.flatMap { [$0.medianMilliseconds, $0.baselineMilliseconds] } + operationTails).max() ?? 1,
+            (snapshot.categories.flatMap { [$0.medianMilliseconds, $0.baselineMilliseconds] } + categoryTails).max() ?? 1
         )
     }
 
@@ -305,9 +310,15 @@ struct SkillsAnalyticsView: View {
     private func operandValueLabel(_ cell: OperandMetricCell) -> String {
         switch operandMetric {
         case .median: AnalyticsFormatting.time(cell.medianMilliseconds)
-        case .p90: AnalyticsFormatting.time(cell.p90Milliseconds)
+        case .p90: p90Label(cell.p90Milliseconds, count: cell.count)
         case .count: String(cell.count)
         }
+    }
+
+    private func p90Label(_ milliseconds: Double, count: Int) -> String {
+        count >= Statistics.reliableTailSampleCount
+            ? AnalyticsFormatting.time(milliseconds)
+            : "Needs \(Statistics.reliableTailSampleCount) samples"
     }
 
     private func operandOpacity(_ cell: OperandMetricCell, in cells: [OperandMetricCell]) -> Double {
@@ -375,10 +386,12 @@ private struct SkillTimingRow: View {
                         .fill(ZetaTheme.caution)
                         .frame(width: 1.5)
                         .offset(x: min(max(baselineX, 0), width - 1))
-                    Image(systemName: "diamond.fill")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.primary)
-                        .offset(x: min(max(p90X - 4, 0), width - 8))
+                    if sampleCount >= Statistics.reliableTailSampleCount {
+                        Image(systemName: "diamond.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.primary)
+                            .offset(x: min(max(p90X - 4, 0), width - 8))
+                    }
                 }
             }
             .frame(height: isSummary ? 13 : 9)
@@ -392,10 +405,17 @@ private struct SkillTimingRow: View {
         .frame(height: isSummary ? 34 : 28)
         .background(isSummary ? ZetaTheme.color(for: operation).opacity(0.07) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(name), median \(AnalyticsFormatting.time(medianMilliseconds)), P90 \(AnalyticsFormatting.time(p90Milliseconds)), baseline \(AnalyticsFormatting.time(baselineMilliseconds)), \(sampleCount) samples")
+        .accessibilityLabel(accessibilitySummary)
     }
 
     private func ratio(_ value: Double) -> CGFloat {
         CGFloat(min(max(value / max(maximumMilliseconds, 1), 0), 1))
+    }
+
+    private var accessibilitySummary: String {
+        let p90 = sampleCount >= Statistics.reliableTailSampleCount
+            ? AnalyticsFormatting.time(p90Milliseconds)
+            : "needs \(Statistics.reliableTailSampleCount) samples"
+        return "\(name), median \(AnalyticsFormatting.time(medianMilliseconds)), P90 \(p90), baseline \(AnalyticsFormatting.time(baselineMilliseconds)), \(sampleCount) samples"
     }
 }

@@ -24,7 +24,7 @@ final class ZetaMaxUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["practiceScore"].label, "1")
     }
 
-    func testCorrectAnswerAutoAdvancesAndReturnIsInert() throws {
+    func testCorrectAnswerAutoAdvancesAndReturnRecordsIncorrectSubmission() throws {
         let app = launch()
         let start = app.buttons["startSessionButton"]
         XCTAssertTrue(start.waitForExistence(timeout: 5))
@@ -34,7 +34,7 @@ final class ZetaMaxUITests: XCTestCase {
         XCTAssertTrue(answer.waitForExistence(timeout: 5))
         answer.typeText("999")
         answer.typeKey(.return, modifierFlags: [])
-        XCTAssertEqual(answer.value as? String, "999", "Return must preserve an incomplete answer")
+        XCTAssertEqual(answer.value as? String, "", "Return should record and clear an incorrect answer")
 
         let questionText = question(in: app)
         XCTAssertTrue(questionText.waitForExistence(timeout: 2))
@@ -45,8 +45,7 @@ final class ZetaMaxUITests: XCTestCase {
 
         answer.typeText("999")
         answer.typeKey(.return, modifierFlags: [])
-        XCTAssertEqual(answer.value as? String, "999", "Focus must remain in the field after automatic advancement")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'accuracy'")).firstMatch.exists)
+        XCTAssertEqual(answer.value as? String, "", "Focus must remain in the field after automatic advancement")
     }
 
     func testNegativeAndDecimalAnswersAutoSubmit() throws {

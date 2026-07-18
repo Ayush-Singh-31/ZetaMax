@@ -18,14 +18,24 @@ struct DistributionAnalyticsView: View {
     }
 
     private var histogramCard: some View {
-        ZetaChartCard(title: "Response-time histogram") {
+        ZetaChartCard(
+            title: "Response-time histogram",
+            subtitle: "The 10s+ bar groups every completion beyond ten seconds."
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 190))], spacing: 8) {
                     summaryTile("Minimum", snapshot.distributionSummary.minimumMilliseconds)
                     summaryTile("Q1", snapshot.distributionSummary.q1Milliseconds)
                     summaryTile("Median", snapshot.distributionSummary.medianMilliseconds)
                     summaryTile("Q3", snapshot.distributionSummary.q3Milliseconds)
-                    summaryTile("P90", snapshot.distributionSummary.p90Milliseconds)
+                    if snapshot.distributionSummary.count >= Statistics.reliableTailSampleCount {
+                        summaryTile("P90", snapshot.distributionSummary.p90Milliseconds)
+                    } else {
+                        unavailableSummaryTile(
+                            "P90",
+                            detail: "Needs \(Statistics.reliableTailSampleCount)"
+                        )
+                    }
                     summaryTile("Maximum", snapshot.distributionSummary.maximumMilliseconds)
                 }
 
@@ -35,11 +45,8 @@ struct DistributionAnalyticsView: View {
                             x: .value("Response time", bin.label),
                             y: .value("Completed questions", bin.count)
                         )
-                        .foregroundStyle(
-                            selectedBinLabel == nil || selectedBinLabel == bin.label
-                                ? ZetaTheme.brand
-                                : ZetaTheme.brand.opacity(0.28)
-                        )
+                        .foregroundStyle(bin.isOverflow ? ZetaTheme.caution : ZetaTheme.brand)
+                        .opacity(selectedBinLabel == nil || selectedBinLabel == bin.label ? 1 : 0.28)
                     }
                 }
                 .chartXSelection(value: $selectedBinLabel)
@@ -190,6 +197,17 @@ struct DistributionAnalyticsView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             Text(AnalyticsFormatting.time(value)).font(.headline.monospacedDigit())
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func unavailableSummaryTile(_ title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            Text("—").font(.headline.monospacedDigit())
+            Text(detail).font(.caption2).foregroundStyle(.secondary)
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)

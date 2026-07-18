@@ -41,7 +41,10 @@ struct BenchmarkAnalyticsView: View {
                         }
                     }
                 } else {
-                    Label("At least 20 matching timings are required.", systemImage: "info.circle")
+                    Label(
+                        "At least 20 timings across 3 similar-duration sessions are required.",
+                        systemImage: "info.circle"
+                    )
                         .foregroundStyle(.secondary)
                 }
 
@@ -69,7 +72,6 @@ struct BenchmarkAnalyticsView: View {
                 .chartYAxisLabel("Completed questions")
                 .chartLegend(.hidden)
                 .frame(height: 320)
-                .animation(reduceMotion || reduceMotionOverride ? nil : .easeOut(duration: 0.16), value: selectedDuration)
                 .accessibilityLabel("Benchmark outlook by duration")
                 .accessibilityValue(projectionAccessibility)
 

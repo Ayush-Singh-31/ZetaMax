@@ -3,7 +3,6 @@ import SwiftUI
 struct RecommendationsView: View {
     @Bindable var engine: SessionEngine
     @Bindable var analyticsStore: AnalyticsStore
-    let revision: RepositoryRevision
 
     var body: some View {
         GeometryReader { geometry in
@@ -45,7 +44,6 @@ struct RecommendationsView: View {
         .accessibilityIdentifier("recommendationsScreen")
         .navigationTitle("Recommendations")
         .onAppear { analyticsStore.requestRecommendations() }
-        .onChange(of: revision.value) { _, _ in analyticsStore.requestRecommendations() }
     }
 
     @ViewBuilder

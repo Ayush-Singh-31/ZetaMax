@@ -58,7 +58,7 @@ struct SettingsView: View {
                 ZetaCard {
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Adaptive practice", systemImage: "scope").font(.headline)
-                        Text("Weights combine relative time-to-correct (50%), recent slowdown (25%), recency (15%), and uncertainty (10%). Ten percent of sampling remains exploratory.")
+                        Text(AdaptiveModelParameters.explanation)
                         Text("Skill estimates are rebuildable caches. Deleting data automatically recalculates them from the remaining completed timings.")
                             .foregroundStyle(.secondary)
                     }
@@ -114,9 +114,14 @@ struct SettingsView: View {
     }
 
     private func export(_ format: ExportFormat) {
-        exportFormat = format
-        exportDocument = ExportService.document(for: sessions, format: format)
-        isExporting = true
+        do {
+            exportFormat = format
+            exportDocument = try ExportService.document(for: sessions, format: format)
+            isExporting = true
+        } catch {
+            messageTitle = "Export failed"
+            message = error.localizedDescription
+        }
     }
 
     private var deleteAllButton: some View {
